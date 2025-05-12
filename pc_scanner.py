@@ -1,24 +1,51 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-06 10:28:08
-FilePath: \\script\\pc_scanner.py
+LastEditTime: 2025-05-12 17:44:03
+FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
 import os
+platform = sys.platform
+print(platform)
+import os
+# 获取当前文件所在目录的上一级路径
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+print(f'parent_dir:{parent_dir}')
+if parent_dir:
+    sys.path.insert(0, parent_dir)
+    
 import socket
 import subprocess
 import time
 from smb.SMBConnection import SMBConnection
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ipaddress import ip_network
 import re
+
+from functools import partial
+from PySide6.QtWidgets import * # type: ignore
+from PySide6.QtGui import * # type: ignore
+from PySide6.QtCore import * # type: ignore
+
+import logging
+import my_log#上级目录中的包
+
+from queue import Queue, Empty
+import requests
+import json
+
+from ui_search_share import Ui_SearchWindow
+
+LOG_TAG = '[SCANNER] '
+log_file = os.path.basename(__file__)
+logger = logging.getLogger(log_file)
 
 # 获取当前网段（仅限 macOS/Linux）
 def get_ip_address():
     system = sys.platform
     
-    print(f'HttpCaller get_ip_address {system}')
+    print(f'ScanCaller get_ip_address {system}')
     
     try:
         if system == "win32":
@@ -102,7 +129,7 @@ def get_hostname(ip):
 # 匿名尝试 SMB 共享
 def try_smb(ip, name=None):
     print(f'try_smb ip:{ip} name:{name} {time.ctime()}')
-
+    
     try:
         conn = SMBConnection('', '', 'scanner', name or ip, use_ntlm_v2=True)
         conn.connect(ip, 445, timeout=3)
@@ -112,7 +139,7 @@ def try_smb(ip, name=None):
         return result
     except Exception as e:
         print(f"❌ SMB 连接失败 {ip}（{name or '无主机名'}）: {e}")
-        return None
+        return e
 
 # 主扫描流程
 def scan_network(subnet):
@@ -128,29 +155,448 @@ def scan_network(subnet):
             shares = None
             access_name = ip
             
-            # 优先使用主机名连接 SMB
-            if hostname:
-                shares = try_smb(ip, hostname)
-                if shares:
-                    access_name = hostname
-            
             # 如果主机名失败，再尝试 IP
             if not shares:
                 shares = try_smb(ip)
             
             if shares:
                 found.append((access_name, shares))
-
+    
     with ThreadPoolExecutor(max_workers=50) as executor:
         executor.map(process, [str(ip) for ip in ip_network(subnet).hosts()])
-
+    
     print("\n🎯 可访问共享:")
     for host, shares in found:
         for share in shares:
             print(f"✅ smb://{host}/{share}")
 
+class SignalEmitter(QObject):
+    resultReady = Signal(object)
+    
+class ScanCaller(QRunnable):
+    def __init__(self, emitter: SignalEmitter):
+        super().__init__()
+        print(f'{time.ctime()} ScanCaller __init__')
+        
+        self.emitter = emitter
+        self.task_queue = Queue()
+        self.running = True
+        self._result = {}
+        
+    def set_emitter(self,emitter: SignalEmitter):
+        print(f'{time.ctime()} ScanCaller set_emitter same:{self.emitter is emitter}')
+        
+        self.emitter = emitter
+    
+    def stop(self):
+        print(f'{time.ctime()} scan')
+        self.running = False
+        self.task_queue.put(None)  # 唤醒阻塞线程退出
+    
+    def scan(self):
+        print(f'{time.ctime()} ScanCaller scan')
+        self.task_queue.put(('scan', None))
+    
+    def get(self, url, timeout=3, **kwargs):
+        print(f'{time.ctime()} ScanCaller get url:{url} timeout:{timeout}')
+        
+        self.task_queue.put(('get', (url, timeout, kwargs)))
+    
+    def post(self, url, timeout=3, data=None, json=None, **kwargs):
+        print(f'{time.ctime()} ScanCaller post url:{url} timeout:{timeout} data:{data} json:{json}')
+        
+        self.task_queue.put(('post', (url, timeout, data, json, kwargs)))
+    
+    def run(self):
+        print("ScanCaller thread running")
+        while self.running:
+            try:
+                task = self.task_queue.get(timeout=1)
+                if task is None:
+                    break
+                
+                task_type, args = task
+                print(f'{time.ctime()} task:{task_type} ----------->')
+                
+                if task_type == 'scan':
+                    result = self._scan_network()
+                elif task_type == 'get':
+                    url, timeout, kwargs = args
+                    result = self._safe_request('get', url, timeout, **kwargs)
+                elif task_type == 'post':
+                    url, timeout, data, json_data, kwargs = args
+                    result = self._safe_request('post', url, timeout, data=data, json=json_data, **kwargs)
+                else:
+                    result = f"{time.ctime()} Unknown task type: {task_type}"
+                    continue
+                
+                print(f'{time.ctime()} task:{task_type} -----------> result:{result}')
+                
+                self._result[task_type] = result
+                
+                if self.emitter:
+                    self.emitter.resultReady.emit(self._result)
+                else:
+                    print(f'{time.ctime()} no emitter!!!')
+                    
+            except Empty:
+                continue
+        #finally:
+        print("ScanCaller thread exiting")
+        
+    def scan_lan_port(self, base_ip="192.168.1", port=12345, timeout=1):
+        print(f'{time.ctime()} scan_lan_port base_ip:{base_ip} port:{port} timeout:{timeout}')
+        """扫描局域网内哪个 IP 的指定端口是开放的"""
+        system = sys.platform
+        
+        for i in range(2, 255):
+            if not self.running:
+                print(f'{time.ctime()} scan_lan_port stop!!!')
+                break
+            
+            ip = f"{base_ip}.{i}"
+            if system == "Windows":
+                # 使用 PowerShell 的 Test-NetConnection
+                cmd = ["powershell", "-Command", f"Test-NetConnection -ComputerName {ip} -Port {port}"]
+            else:
+                # 使用 nc 命令（需要确保安装了 netcat）
+                cmd = ["nc", "-z", "-w", str(timeout), ip, str(port)]
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout+1)
+                output = result.stdout.lower()
+                if system == "Windows":
+                    if "tcp test succeeded" in output:
+                        print(f"[+] Found open port {port} on {ip}")
+                        return ip
+                else:
+                    if result.returncode == 0:
+                        print(f"[+] Found open port {port} on {ip}")
+                        return ip
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception as e:
+                print(f"Error scanning {ip}:{port} => {e}")
+        
+        return None
+    
+    def _scan_single_ip(self, ip):
+        """扫描单个 IP 地址，检查是否开放 SMB 以及共享信息"""
+        try:
+            if is_smb_open(ip):
+                print(f"🔌 {ip} 开放 SMB")
+                hostname = get_hostname(ip)
+                print(f"🔍 主机名: {hostname or '未知'}")
+                
+                data = {
+                    'ip': ip,
+                    'name': hostname,
+                    'shares': ''
+                }
+                
+                shares = try_smb(ip)
+                data['shares'] = shares
+                
+                return data if shares else None
+        except Exception as e:
+            print(f'{time.ctime()} fail:{e}')
+            if data:
+                data['error'] = e
+        return None
+    
+    def _scan_network(self):
+        """使用多线程对局域网内所有 IP 地址进行扫描"""
+        local_ip = get_ip_address()
+        results = {}
+        print(f'{time.ctime()} _scan_network {local_ip}')
+
+        if local_ip:
+            ip_prefix = ".".join(local_ip.split(".")[:3])
+            ip_list = [f"{ip_prefix}.{i}" for i in range(1, 255)]
+
+            # 使用线程池进行并发扫描
+            max_workers = min(32, (os.cpu_count() or 1) * 5)
+            with ThreadPoolExecutor(max_workers) as executor:
+                future_to_ip = {executor.submit(self._scan_single_ip, ip): ip for ip in ip_list}
+                
+                for future in as_completed(future_to_ip):
+                    ip = future_to_ip[future]
+                    try:
+                        data = future.result()
+                        if data:
+                            results[ip] = data
+                    except Exception as e:
+                        print(f"{time.ctime()} 扫描 {ip} 时出错: {e}")
+            
+            print("\n🎯 可访问共享:")
+            for host, data in results.items():
+                shares = data['shares']
+                if isinstance(shares,list):
+                    smbshares = []
+                    for share in shares:
+                        if 'win32' == platform:
+                            pth = f"\\\\{host}\\{share}"
+                        else:
+                            pth = f'smb://{host}/{share}'
+                            
+                        smbshares.append(pth)
+                        print(f"✅ {pth}")
+                    # data['shares'] = smbshares
+                else:
+                    print(f'{shares}')
+        return results
+    
+    def _safe_request(self, method, url, timeout=3, **kwargs):
+        print(f'{time.ctime()} ScanCaller _safe_request method:{method} url:{url} timeout:{timeout} kwargs:{kwargs}')
+        try:
+            r = getattr(requests, method)(url, timeout=timeout, **kwargs)
+            print(f'{time.ctime()} code:{r.status_code}')
+            
+            return r.json() if r.status_code == 200 else f"Error: {r.status_code}"
+        except Exception as e:
+            print(f"{time.ctime()} _safe_request Exception: {e}")
+            
+            return ''
+
+DEFAULT_FILE_NAME = "result.json"
+def load_results(file_path=DEFAULT_FILE_NAME):
+    """
+    加载测试结果文件，如果不存在则创建一个空的测试结果文件。
+    :param file_path: 测试结果文件路径
+    :return: 测试结果字典
+    """
+    if not os.path.exists(file_path):
+        # 文件不存在，创建一个空文件
+        with open(file_path, 'w') as file:
+            json.dump([], file, indent=4)
+        return {}
+    else:
+        # 读取文件内容
+        with open(file_path, 'r') as file:
+            return json.load(file)
+def save_results(test_results, file_path=DEFAULT_FILE_NAME):
+    """
+    保存测试结果到文件中。
+    :param test_results: 测试结果列表
+    :param file_path: 测试结果文件路径
+    """
+    with open(file_path, 'w') as file:
+        json.dump(test_results, file, indent=4)
+        
+class SearchWindow(QMainWindow):
+    def __init__(self):
+        super(SearchWindow, self).__init__()
+        self.ui = Ui_SearchWindow()
+        self.ui.setupUi(self)
+        self.ui.statusbar.showMessage('初始化...')
+        local_ip = get_ip_address()
+        ip_prefix = '' if local_ip is None else ".".join(local_ip.split(".")[:3])
+        
+        print(f'ip:{local_ip} ip_prefix:{ip_prefix}')
+        
+        # Initialize treeView
+        self.ui.treeWidget_sharelist.setHeaderLabels(["IP/Share", "Status"])
+        self.ui.treeWidget_sharelist.setContextMenuPolicy(Qt.CustomContextMenu) # type: ignore
+        self.ui.treeWidget_sharelist.customContextMenuRequested.connect(self.show_context_menu)
+        self.ui.treeWidget_sharelist.itemDoubleClicked.connect(self.on_item_double_clicked)
+        
+        self.signal_emitter = SignalEmitter()
+        self.scan_caller = ScanCaller(self.signal_emitter)
+        QThreadPool.globalInstance().start(self.scan_caller)
+        
+        self.ui.lineEdit_ip.setText(f'{local_ip}')
+        self.ui.lineEdit_subnet.setText(f'{ip_prefix}')
+        self.ui.pushButton_search.clicked.connect(partial(self.scan_shares))
+        if local_ip:
+            self.ui.statusbar.showMessage('初始化成功')
+        else:
+            self.ui.statusbar.showMessage('初始化失败')
+        
+        self.share_map = load_results()
+        
+    def showEvent(self, event):
+        print(f"{self.windowTitle()} showEvent")
+        super().showEvent(event)
+        
+        self.ui.treeWidget_sharelist.clearSelection()
+        
+    def hideEvent(self, event):
+        print(f"{self.windowTitle()} hideEvent")
+        super().hideEvent(event)
+        
+    def closeEvent(self, event):
+        print(LOG_TAG+f"{self.windowTitle()} closeEvent!!!")
+        if self.scan_caller:
+            self.scan_caller.stop()
+        
+        save_results(self.share_map)
+        
+        event.accept()#self.manager.show_window(WINDOW_TITLE.START)
+        QCoreApplication.quit()
+        
+    def scan_shares(self):
+        self.scan_caller.emitter.resultReady.connect(self.on_scan_complete)
+        self.scan_caller.scan()
+        self.ui.statusbar.showMessage(f'{time.ctime()} 扫描开始...')
+        
+    def on_scan_complete(self, result):
+        print("on_scan_complete [Scan Result]:", len(result) if result else result)
+        self.ui.treeWidget_sharelist.clear()  # Clear existing tree items
+        
+        self.scan_caller.emitter.resultReady.disconnect(self.on_scan_complete)
+        
+        self.ui.statusbar.showMessage(f'{time.ctime()} 扫描结束')
+        
+        if result:
+            if isinstance(result,dict):
+                result = result.get('scan')
+                if isinstance(result,dict):
+                    self.share_map = result
+                    for ip, data in result.items(): 
+                        self.add_to_tree(ip, data)
+                        
+    def get_top_level_parent(self,item):
+        """获取最顶层的父项（如果 item 本身就是顶层，则返回自身）"""
+        while item.parent() is not None:  # 只要还有父项，就继续向上查找
+            item = item.parent()
+        return item
+    
+    def add_to_tree(self, ip, data):
+        # Check if the IP node already exists
+        root = self.ui.treeWidget_sharelist
+        existing_ip_item = None
+        for i in range(root.topLevelItemCount()):
+            item = root.topLevelItem(i)
+            if item.text(0) == ip:
+                existing_ip_item = item
+                break
+        
+        # If the IP node exists, use it; otherwise, create a new one
+        if existing_ip_item is None:
+            # Create a new IP item
+            ip_item = QTreeWidgetItem(self.ui.treeWidget_sharelist)
+            ip_item.setText(0, ip)
+            ip_item.setCheckState(0, Qt.Unchecked)  # Add checkbox
+        else:
+            ip_item = existing_ip_item
+            # Add data to the IP node
+            if isinstance(data, list):
+                existing_shares = set()
+                # Collect existing shares under this IP
+                for i in range(ip_item.childCount()):
+                    existing_shares.add(ip_item.child(i).text(0))
+                # Add only the new shares
+                for item in data:
+                    if item not in existing_shares:
+                        share_item = QTreeWidgetItem(ip_item)
+                        share_item.setText(0, item)
+                return
+        
+        ip_item.setText(1, data.get('name', 'Unknown'))
+        
+        shares = data.get('shares')
+        if isinstance(shares, str):
+            # If shares is a string, mark it as an error
+            share_item = QTreeWidgetItem(ip_item)
+            share_item.setText(0, shares)
+            share_item.setBackground(0, Qt.red)
+        elif isinstance(shares, list):
+            # If shares is a list, add each one as a child
+            for share in shares:
+                share_item = QTreeWidgetItem(ip_item)
+                share_item.setText(0, share)
+
+    def show_context_menu(self, position):
+        # Show right-click menu
+        item = self.ui.treeWidget_sharelist.itemAt(position)
+        if item:
+            menu = QMenu()
+            connect_action = menu.addAction("连接")
+            delete_action = menu.addAction("删除")
+            action = menu.exec_(self.ui.treeWidget_sharelist.viewport().mapToGlobal(position))
+            if action == connect_action:
+                self.connect_share(item)
+            elif action == delete_action:
+                self.delete_item(item)
+    
+    def connect_share(self, item):
+        # Try connecting to the share
+        ip = self.get_top_level_parent(item)
+        share = item.text(0) if item.parent() else None
+        username = self.share_map[ip].get('username','')
+        password = self.share_map[ip].get('password','')
+        
+        logger.info(f'{LOG_TAG} ip:{ip} {username} {password}')
+        
+        if share is None:
+            if not username:
+                logger.info(f'{LOG_TAG} no username')
+                username, ok = QInputDialog.getText(self, "输入用户名", f"连接到 {ip} 的用户名：")
+                if ok:
+                    password, ok = QInputDialog.getText(self, "输入密码", f"连接到 {ip} 的密码：", QLineEdit.Password)
+                    
+                    self.share_map[ip]['username'] = username
+                    self.share_map[ip]['password'] = password
+        try:
+            conn = SMBConnection(username, password, "my_pc", ip, use_ntlm_v2=True, is_direct_tcp=True)
+            if conn.connect(ip, 445):  # SMB usually runs on port 139 or 445
+                QMessageBox.information(self, "成功", f"连接到 {share or ip} 445 成功")
+                item.setBackground(0, Qt.green)
+                
+                if share is None:
+                    shares = conn.listShares()
+                    result = [s.name for s in shares if not s.isSpecial and s.name not in ['NETLOGON', 'SYSVOL']]
+                    if shares:
+                        self.add_to_tree(ip,result)
+                        
+                if share:  # List files if a specific share
+                    share = share.strip("\\")  # 确保路径格式正确
+                    print(f"Listing files in share: {share}")
+                    try:
+                        # 列出共享路径的文件
+                        files = conn.listPath(share, "/")
+                        for file in files:
+                            print(f"File: {file.filename}, Directory: {file.isDirectory}")
+                            file_item = QTreeWidgetItem(item)
+                            file_item.setText(0, file.filename)
+                            file_item.setText(1, "文件夹" if file.isDirectory else "文件")
+                            if file.isDirectory:
+                                file_item.setCheckState(0, Qt.Unchecked)  # Add checkbox
+                                item.setCheckState(0, Qt.Unchecked)  # Add checkbox
+                    except Exception as e:
+                        print(f"Failed to list files on share {share}: {e}")
+                        item.setBackground(0, Qt.red)
+            elif conn.connect(ip, 139):  # 再尝试端口 139:
+                QMessageBox.information(self, "成功", f"连接到 {share or ip} 139 成功")
+            else:
+                raise Exception("连接失败")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"连接失败: {e}")
+            logger.error(f'connect_share fail! {e}')
+            item.setBackground(0, Qt.red)
+
+    def delete_item(self, item):
+        # Remove the selected item from the tree
+        parent = item.parent()
+        if parent:
+            parent.removeChild(item)
+        else:
+            index = self.ui.treeWidget_sharelist.indexOfTopLevelItem(item)
+            self.ui.treeWidget_sharelist.takeTopLevelItem(index)
+
+    def on_item_double_clicked(self, item, column):
+        # Double-click to connect
+        if item.parent():
+            self.connect_share(item)
+            
 if __name__ == "__main__":
-    ip = get_ip_address()
-    subnet = get_local_subnet(ip) # type: ignore
-    print(f'ip:{ip} subnet:{subnet}')
-    scan_network(subnet)
+    current_time = time.strftime("%Y-%m-%d-%H-%M-%S")
+    log_file = f"{log_file}-{current_time}" 
+    my_log.initLogging(log_file=log_file,message=f'{LOG_TAG}================================ {current_time} [START] {log_file} ================================')
+    
+    app = QApplication(sys.argv)
+    window = SearchWindow()
+    window.show()
+    
+    sys.exit(app.exec())
+
