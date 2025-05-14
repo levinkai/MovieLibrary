@@ -1,13 +1,13 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-14 10:53:54
+LastEditTime: 2025-05-14 14:21:41
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
+from pydoc import text
 import sys
 import os
 
-import test
 platform = sys.platform
 print(platform)
 import os
@@ -550,7 +550,7 @@ class SearchWindow(QMainWindow):
                     if item not in existing_shares:
                         share_item = QTreeWidgetItem(ip_item)
                         share_item.setText(0, item)
-                return
+                return share_item
         
         ip_item.setText(1, data.get('name', 'Unknown'))
         
@@ -567,7 +567,8 @@ class SearchWindow(QMainWindow):
             for share in shares:
                 share_item = QTreeWidgetItem(ip_item)
                 share_item.setText(0, share)
-
+            return ip_item
+        
     def show_context_menu(self, position):
         # Show right-click menu
         item = self.ui.treeWidget_sharelist.itemAt(position)
@@ -582,79 +583,101 @@ class SearchWindow(QMainWindow):
                 self.delete_item(item)
     
     def connect_share(self, item):
-        # Try connecting to the share
+        """
+        Establish an SMB connection and refresh the tree structure for the share.
+        Recursively list all files and directories under the share.
+        """
         topitem = self.get_top_level_parent(item)
         ip = topitem.text(0)
-        parent = item.parent()
-        if parent:
-            parent = parent.text(0)
-            
         share = item.text(0) if item.parent() else None
-        username = '' if not self.share_map else self.share_map[ip].get('username','')
-        password = '' if not self.share_map else self.share_map[ip].get('password','')
-        
-        logger.info(f'{LOG_TAG} ip:{ip} {username} {password}')
-        
-        if share is None:
-            if not username:
-                logger.info(f'{LOG_TAG} no username')
-                username, ok = QInputDialog.getText(self, "输入用户名", f"连接到 {ip} 的用户名：")
-                if ok:
-                    password, ok = QInputDialog.getText(self, "输入密码", f"连接到 {ip} 的密码：") #, QLineEdit.Password type: ignore 
-                    
-                    if ip not in self.share_map:
-                        self.share_map[ip] = {}
-                        
-                    self.share_map[ip]['username'] = username
-                    self.share_map[ip]['password'] = password
+        username = '' if not self.share_map else self.share_map[ip].get('username', '')
+        password = '' if not self.share_map else self.share_map[ip].get('password', '')
+
+        logger.info(f'{LOG_TAG} Connecting to IP: {ip}, Username: {username}, Share: {share}')
+
+        if not username:  # Prompt for credentials if not provided
+            username, ok = QInputDialog.getText(self, "输入用户名", f"连接到 {ip} 的用户名：")
+            if ok:
+                password, ok = QInputDialog.getText(self, "输入密码", f"连接到 {ip} 的密码：") # , QLineEdit.Password type: ignore
+                if not ip in self.share_map:
+                    self.share_map[ip] = {}
+                self.share_map[ip]['username'] = username
+                self.share_map[ip]['password'] = password
+
         try:
+            # Establish SMB connection
             conn = SMBConnection(username, password, "my_pc", ip, use_ntlm_v2=True, is_direct_tcp=True)
-            if conn.connect(ip, 445):  # SMB usually runs on port 139 or 445
-                #QMessageBox.information(self, "成功", f"连接到 {share or ip} 445 成功")
-                show_auto_close_message(title="成功",text=f"连接到 {share or ip} 445 成功",window=self)
+            if conn.connect(ip, 445):
+                logger.info(f"{LOG_TAG} Connected to {ip} via port 445")
+                show_auto_close_message(title="成功", text=f"连接到 {ip} 成功", window=self)
                 item.setBackground(0, Qt.green)
-                if item == topitem:
-                    self.remove_all_children(item)
+
+                # Clear existing children and refresh the tree structure
+                self.remove_all_children(item)
+                shares = conn.listShares()
+                shares = [s.name for s in shares if not s.isSpecial and s.name not in ['NETLOGON', 'SYSVOL']]
+                for share in shares:
+                    if share:
+                        item = QTreeWidgetItem(topitem)
+                        item.setText(0, share)
+                        self.list_files_recursive(conn, item, share, "/")
+                    else:
+                        logger.info(f"{LOG_TAG} {ip} has no shares!")
+                        show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
                 
-                if share is None:
-                    shares = conn.listShares()
-                    result = [s.name for s in shares if not s.isSpecial and s.name not in ['NETLOGON', 'SYSVOL']]
-                    if shares:
-                        self.share_map[ip]['shares'] = result
-                        self.add_to_tree(ip,result)
-                        
-                if share:  # List files if a specific share
-                    share = share.strip("\\")  # 确保路径格式正确
-                    print(f"Listing files in share: {share}")
-                    try:
-                        # 列出共享路径的文件
-                        if parent != ip:
-                            files = conn.listPath(parent,share)
-                        else:
-                            #top item
-                            files = conn.listPath(share, "/")
-                        for file in files:
-                            print(f"File: {file.filename}, Directory: {file.isDirectory}")
-                            file_item = QTreeWidgetItem(item)
-                            file_item.setText(0, file.filename)
-                            file_item.setText(1, "文件夹" if file.isDirectory else "文件")
-                            if file.isDirectory:
-                                file_item.setCheckState(0, Qt.Unchecked)  # Add checkbox
-                                item.setCheckState(0, Qt.Unchecked)  # Add checkbox
-                    except Exception as e:
-                        print(f"Failed to list files on share top:{ip} parent:{parent} share:{share}: {e}")
-                        item.setBackground(0, Qt.red)
-            elif conn.connect(ip, 139):  # 再尝试端口 139:
-                #QMessageBox.information(self, "成功", f"连接到 {share or ip} 139 成功")
-                show_auto_close_message(title="成功",text=f"连接到 {share or ip} 139 成功",window=self)
+            elif conn.connect(ip, 139):
+                logger.info(f"{LOG_TAG} Connected to {ip} via port 139")
+                show_auto_close_message(title="成功", text=f"连接到 {ip} 成功 (端口 139)", window=self)
             else:
-                raise Exception("连接失败")
+                raise Exception("无法连接到 SMB 服务")
+
         except Exception as e:
-            #QMessageBox.critical(self, "错误", f"连接失败: {e}")
-            show_auto_close_message(title="错误",text=f"连接失败: {e}",window=self,icon=QMessageBox.Critical) # type: ignore
-            logger.error(f'connect_share fail! {e}')
+            logger.error(f"{LOG_TAG} Failed to connect to {ip}: {e}")
+            show_auto_close_message(title="错误", text=f"连接失败: {e}", window=self, icon=QMessageBox.Critical) # type: ignore
             item.setBackground(0, Qt.red) # type: ignore
     
+    def list_files_recursive(self, conn, parent_item, share, current_path):
+        """
+        Recursively list files and directories in a shared path and populate QTreeWidgetItem.
+        :param conn: SMBConnection object
+        :param parent_item: QTreeWidgetItem parent node
+        :param share: SMB share name
+        :param current_path: Current directory path in the share
+        """
+        try:
+            # Strip leading and trailing slashes for consistency
+            current_path = current_path.strip("\\").strip("/")
+            logger.info(f'{LOG_TAG} list_files_recursive try conn.listPath({share}, {current_path})')
+
+            # Fetch the list of files and directories in the current path
+            files = conn.listPath(share, current_path if current_path else "/")
+            
+            for file in files:
+                logger.info(f'{LOG_TAG} {file.filename}|{"文件夹" if file.isDirectory else "文件"}')
+                
+                # Skip special entries and hidden directories
+                if file.filename.startswith(('.', '\\', '$')):
+                    continue
+                
+                # Create a tree item for the file or directory
+                file_item = QTreeWidgetItem(parent_item)
+                file_item.setText(0, file.filename)
+                file_item.setText(1, "文件夹" if file.isDirectory else "文件")
+                
+                if file.isDirectory:
+                    file_item.setCheckState(0, Qt.Unchecked)  # Add checkbox for directories
+                    file_item.setBackground(0, Qt.NoBrush)  # Reset background color
+
+                    # Build the next path for the recursive call
+                    next_path = f"{current_path}/{file.filename}" if current_path else file.filename
+                    logger.info(f'{LOG_TAG} next share:{share} path:{next_path}')
+                    
+                    # Recursively list the contents of the directory
+                    self.list_files_recursive(conn, file_item, share, next_path)
+
+        except Exception as e:
+            logger.error(f"Failed to list path {current_path} in share {share}: {e}")
+            show_auto_close_message(title="错误", text=f"Failed to list path {current_path} in share {share}: {e}", window=self, icon=QMessageBox.Critical)  # type: ignore
     def delete_item(self, item):
         # Remove the selected item from the tree
         parent = item.parent()
@@ -690,7 +713,7 @@ class SearchWindow(QMainWindow):
             
 if __name__ == "__main__":
     current_time = time.strftime("%Y-%m-%d-%H-%M-%S")
-    log_file = f"{log_file}-{current_time}" 
+    # log_file = f"{log_file}-{current_time}" 
     my_log.initLogging(log_file=log_file,message=f'{LOG_TAG}================================ {current_time} [START] {log_file} ================================')
     
     app = QApplication(sys.argv)
