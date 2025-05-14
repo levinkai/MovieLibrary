@@ -1,10 +1,9 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-14 14:21:41
+LastEditTime: 2025-05-14 17:59:09
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
-from pydoc import text
 import sys
 import os
 
@@ -98,15 +97,15 @@ def get_local_subnet(ip=''):
             # 使用 ipconfig 获取所有网卡信息
             result = subprocess.run(["ipconfig", "getifaddr", "en0"], stdout=subprocess.PIPE, text=True)
             ip = result.stdout.strip()
-
+            
             # 如果 en0 没有IP，尝试 en1（可能是Wi-Fi）
             if not ip:
                 result = subprocess.run(["ipconfig", "getifaddr", "en1"], stdout=subprocess.PIPE, text=True)
                 ip = result.stdout.strip()
-
+            
             if not ip or ip.startswith("127."):
                 raise RuntimeError("未能获取有效的本地 IP 地址")
-
+        
         subnet = ".".join(ip.split(".")[:3]) + ".0/24"
         return subnet
 
@@ -592,9 +591,9 @@ class SearchWindow(QMainWindow):
         share = item.text(0) if item.parent() else None
         username = '' if not self.share_map else self.share_map[ip].get('username', '')
         password = '' if not self.share_map else self.share_map[ip].get('password', '')
-
+        
         logger.info(f'{LOG_TAG} Connecting to IP: {ip}, Username: {username}, Share: {share}')
-
+        
         if not username:  # Prompt for credentials if not provided
             username, ok = QInputDialog.getText(self, "输入用户名", f"连接到 {ip} 的用户名：")
             if ok:
@@ -603,7 +602,7 @@ class SearchWindow(QMainWindow):
                     self.share_map[ip] = {}
                 self.share_map[ip]['username'] = username
                 self.share_map[ip]['password'] = password
-
+        
         try:
             # Establish SMB connection
             conn = SMBConnection(username, password, "my_pc", ip, use_ntlm_v2=True, is_direct_tcp=True)
@@ -611,7 +610,7 @@ class SearchWindow(QMainWindow):
                 logger.info(f"{LOG_TAG} Connected to {ip} via port 445")
                 show_auto_close_message(title="成功", text=f"连接到 {ip} 成功", window=self)
                 item.setBackground(0, Qt.green)
-
+                
                 # Clear existing children and refresh the tree structure
                 self.remove_all_children(item)
                 shares = conn.listShares()
@@ -620,7 +619,46 @@ class SearchWindow(QMainWindow):
                     if share:
                         item = QTreeWidgetItem(topitem)
                         item.setText(0, share)
-                        self.list_files_recursive(conn, item, share, "/")
+                        if 'win32' == platform:
+                            path = rf"\\{ip}\{share}"
+                            if os.path.exists(path):
+                                video_exts = {'.rm', '.rmvb', '.mkv', '.mp3', '.wmv'}
+                                video_files = []
+                                dir_list = []
+                                file_list = []
+                                for root, dirs, files in os.walk(path):
+                                    # 1. 必须原地修改dirs以控制递归
+                                    dir_list[:] = [d for d in dirs if not d.startswith(('.', '\\', '$'))]
+                                    file_list[:] = [f for f in files if not f.startswith(('.', '\\', '$'))]
+                                    break
+                                
+                                for d in dir_list:
+                                    if d.startswith(('.', '\\', '$')):
+                                        continue
+                                    sub_item = QTreeWidgetItem(item)
+                                    sub_item.setText(0, d)
+                                    sub_item.setCheckState(0, Qt.Unchecked)  # type: ignore # Add checkbox for directories
+                                    sub_item.setBackground(0, Qt.NoBrush)  # type: ignore # Reset background color
+                                    
+                                    full_path = os.path.join(root, d)
+                                    print(full_path)
+                                        
+                                # 过滤文件并匹配扩展名
+                                for f in file_list:
+                                    if f.startswith(('.', '\\', '$')):
+                                        continue
+                                    
+                                    sub_item = QTreeWidgetItem(item)
+                                    sub_item.setText(0, f)
+                                    
+                                    full_path = os.path.join(root, f)
+                                    print(full_path)
+                                    
+                                    if os.path.splitext(f)[1].lower() in video_exts:
+                                        video_files.append(full_path)
+                        
+                        else:
+                            self.list_files_recursive(conn, item, share, "/")
                     else:
                         logger.info(f"{LOG_TAG} {ip} has no shares!")
                         show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
@@ -665,19 +703,20 @@ class SearchWindow(QMainWindow):
                 file_item.setText(1, "文件夹" if file.isDirectory else "文件")
                 
                 if file.isDirectory:
-                    file_item.setCheckState(0, Qt.Unchecked)  # Add checkbox for directories
-                    file_item.setBackground(0, Qt.NoBrush)  # Reset background color
-
+                    file_item.setCheckState(0, Qt.Unchecked)  # type: ignore # Add checkbox for directories
+                    file_item.setBackground(0, Qt.NoBrush)  # type: ignore # Reset background color
+                    
                     # Build the next path for the recursive call
                     next_path = f"{current_path}/{file.filename}" if current_path else file.filename
                     logger.info(f'{LOG_TAG} next share:{share} path:{next_path}')
                     
                     # Recursively list the contents of the directory
                     self.list_files_recursive(conn, file_item, share, next_path)
-
+        
         except Exception as e:
             logger.error(f"Failed to list path {current_path} in share {share}: {e}")
             show_auto_close_message(title="错误", text=f"Failed to list path {current_path} in share {share}: {e}", window=self, icon=QMessageBox.Critical)  # type: ignore
+    
     def delete_item(self, item):
         # Remove the selected item from the tree
         parent = item.parent()
