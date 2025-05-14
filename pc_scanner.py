@@ -1,11 +1,13 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-12 17:44:03
+LastEditTime: 2025-05-14 10:53:54
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
 import os
+
+import test
 platform = sys.platform
 print(platform)
 import os
@@ -138,8 +140,9 @@ def try_smb(ip, name=None):
         conn.close()
         return result
     except Exception as e:
-        print(f"❌ SMB 连接失败 {ip}（{name or '无主机名'}）: {e}")
-        return e
+        err = str(e)
+        print(f"❌ SMB 连接失败 {ip}（{name or '无主机名'}）: err")
+        return err
 
 # 主扫描流程
 def scan_network(subnet):
@@ -367,22 +370,70 @@ def load_results(file_path=DEFAULT_FILE_NAME):
     """
     if not os.path.exists(file_path):
         # 文件不存在，创建一个空文件
-        with open(file_path, 'w') as file:
-            json.dump([], file, indent=4)
+        try:
+            with open(file_path, 'w') as file:
+                json.dump([], file, indent=4)
+        except Exception as e:
+            logger.error(f"{LOG_TAG} load_results creat file fail!{e}")
         return {}
     else:
         # 读取文件内容
-        with open(file_path, 'r') as file:
-            return json.load(file)
+        try:
+            with open(file_path, 'r') as file:
+                return json.load(file)
+        except Exception as e:
+            logger.error(f"{LOG_TAG} load_results fail!{e} clear it!")
+            with open(file_path, 'w') as file:
+                json.dump([], file, indent=4)
+            return {}
+        
 def save_results(test_results, file_path=DEFAULT_FILE_NAME):
     """
     保存测试结果到文件中。
     :param test_results: 测试结果列表
     :param file_path: 测试结果文件路径
     """
-    with open(file_path, 'w') as file:
-        json.dump(test_results, file, indent=4)
+    try:
+        with open(file_path, 'w') as file:
+            json.dump(test_results, file, indent=4)
+    except Exception as e:
+        logger.error(f"{LOG_TAG} save_results fail!{e}")
         
+def show_auto_close_message(
+    title: str,
+    text: str,
+    timeout_ms: int = 3000,
+    window: QWidget | None = None,
+    icon=QMessageBox.Information, # type: ignore
+    buttons=QMessageBox.Ok # type: ignore
+):
+    """
+    显示一个超时自动关闭的消息框
+    
+    :param title: 窗口标题
+    :param text: 消息内容
+    :param timeout_ms: 自动关闭超时（毫秒）
+    :param window: 父窗口（可选，设为None则作为独立窗口）
+    :param icon: 图标类型（如 QMessageBox.Critical）
+    :param buttons: 按钮类型（如 QMessageBox.Ok | QMessageBox.Cancel）
+    """
+    msg_box = QMessageBox(window if window else None)  # 设置父窗口或独立窗口
+    msg_box.setIcon(icon)
+    msg_box.setWindowTitle(title)
+    msg_box.setText(text)
+    msg_box.setStandardButtons(buttons)
+
+    # 设置超时自动关闭
+    QTimer.singleShot(timeout_ms, msg_box.close)
+
+    # 根据父窗口决定模态行为
+    if window:
+        msg_box.setModal(True)  # 模态阻塞父窗口
+    else:
+        msg_box.setWindowModality(Qt.ApplicationModal)  # 独立应用模态 # type: ignore
+
+    msg_box.exec()
+    
 class SearchWindow(QMainWindow):
     def __init__(self):
         super(SearchWindow, self).__init__()
@@ -414,6 +465,9 @@ class SearchWindow(QMainWindow):
         
         self.share_map = load_results()
         
+        if self.share_map:
+            self.on_scan_complete(self.share_map)
+            
     def showEvent(self, event):
         print(f"{self.windowTitle()} showEvent")
         super().showEvent(event)
@@ -443,18 +497,24 @@ class SearchWindow(QMainWindow):
         print("on_scan_complete [Scan Result]:", len(result) if result else result)
         self.ui.treeWidget_sharelist.clear()  # Clear existing tree items
         
-        self.scan_caller.emitter.resultReady.disconnect(self.on_scan_complete)
-        
-        self.ui.statusbar.showMessage(f'{time.ctime()} 扫描结束')
-        
+        try:
+            if isinstance(result,dict):
+                if 'scan' in result:
+                    self.scan_caller.emitter.resultReady.disconnect(self.on_scan_complete)
+                    self.ui.statusbar.showMessage(f'{time.ctime()} 扫描结束')
+                    result = result.get('scan')
+                    logger.info(f'{LOG_TAG} scan result')
+                else:
+                    logger.info(f'{LOG_TAG} init result')
+        except Exception as e:
+            logger.error(f'{LOG_TAG} on_scan_complete fail! {e}')
+            
         if result:
             if isinstance(result,dict):
-                result = result.get('scan')
-                if isinstance(result,dict):
-                    self.share_map = result
-                    for ip, data in result.items(): 
-                        self.add_to_tree(ip, data)
-                        
+                self.share_map = result
+                for ip, data in result.items(): 
+                    self.add_to_tree(ip, data)
+                    
     def get_top_level_parent(self,item):
         """获取最顶层的父项（如果 item 本身就是顶层，则返回自身）"""
         while item.parent() is not None:  # 只要还有父项，就继续向上查找
@@ -467,7 +527,7 @@ class SearchWindow(QMainWindow):
         existing_ip_item = None
         for i in range(root.topLevelItemCount()):
             item = root.topLevelItem(i)
-            if item.text(0) == ip:
+            if item.text(0) == ip: # type: ignore
                 existing_ip_item = item
                 break
         
@@ -476,7 +536,7 @@ class SearchWindow(QMainWindow):
             # Create a new IP item
             ip_item = QTreeWidgetItem(self.ui.treeWidget_sharelist)
             ip_item.setText(0, ip)
-            ip_item.setCheckState(0, Qt.Unchecked)  # Add checkbox
+            ip_item.setCheckState(0, Qt.Unchecked)  # type: ignore # Add checkbox
         else:
             ip_item = existing_ip_item
             # Add data to the IP node
@@ -495,11 +555,13 @@ class SearchWindow(QMainWindow):
         ip_item.setText(1, data.get('name', 'Unknown'))
         
         shares = data.get('shares')
+        if isinstance(shares,ConnectionResetError):
+            shares = f'{shares}'
         if isinstance(shares, str):
             # If shares is a string, mark it as an error
             share_item = QTreeWidgetItem(ip_item)
             share_item.setText(0, shares)
-            share_item.setBackground(0, Qt.red)
+            share_item.setBackground(0, Qt.red) # type: ignore
         elif isinstance(shares, list):
             # If shares is a list, add each one as a child
             for share in shares:
@@ -521,10 +583,15 @@ class SearchWindow(QMainWindow):
     
     def connect_share(self, item):
         # Try connecting to the share
-        ip = self.get_top_level_parent(item)
+        topitem = self.get_top_level_parent(item)
+        ip = topitem.text(0)
+        parent = item.parent()
+        if parent:
+            parent = parent.text(0)
+            
         share = item.text(0) if item.parent() else None
-        username = self.share_map[ip].get('username','')
-        password = self.share_map[ip].get('password','')
+        username = '' if not self.share_map else self.share_map[ip].get('username','')
+        password = '' if not self.share_map else self.share_map[ip].get('password','')
         
         logger.info(f'{LOG_TAG} ip:{ip} {username} {password}')
         
@@ -533,20 +600,27 @@ class SearchWindow(QMainWindow):
                 logger.info(f'{LOG_TAG} no username')
                 username, ok = QInputDialog.getText(self, "输入用户名", f"连接到 {ip} 的用户名：")
                 if ok:
-                    password, ok = QInputDialog.getText(self, "输入密码", f"连接到 {ip} 的密码：", QLineEdit.Password)
+                    password, ok = QInputDialog.getText(self, "输入密码", f"连接到 {ip} 的密码：") #, QLineEdit.Password type: ignore 
                     
+                    if ip not in self.share_map:
+                        self.share_map[ip] = {}
+                        
                     self.share_map[ip]['username'] = username
                     self.share_map[ip]['password'] = password
         try:
             conn = SMBConnection(username, password, "my_pc", ip, use_ntlm_v2=True, is_direct_tcp=True)
             if conn.connect(ip, 445):  # SMB usually runs on port 139 or 445
-                QMessageBox.information(self, "成功", f"连接到 {share or ip} 445 成功")
+                #QMessageBox.information(self, "成功", f"连接到 {share or ip} 445 成功")
+                show_auto_close_message(title="成功",text=f"连接到 {share or ip} 445 成功",window=self)
                 item.setBackground(0, Qt.green)
+                if item == topitem:
+                    self.remove_all_children(item)
                 
                 if share is None:
                     shares = conn.listShares()
                     result = [s.name for s in shares if not s.isSpecial and s.name not in ['NETLOGON', 'SYSVOL']]
                     if shares:
+                        self.share_map[ip]['shares'] = result
                         self.add_to_tree(ip,result)
                         
                 if share:  # List files if a specific share
@@ -554,7 +628,11 @@ class SearchWindow(QMainWindow):
                     print(f"Listing files in share: {share}")
                     try:
                         # 列出共享路径的文件
-                        files = conn.listPath(share, "/")
+                        if parent != ip:
+                            files = conn.listPath(parent,share)
+                        else:
+                            #top item
+                            files = conn.listPath(share, "/")
                         for file in files:
                             print(f"File: {file.filename}, Directory: {file.isDirectory}")
                             file_item = QTreeWidgetItem(item)
@@ -564,26 +642,47 @@ class SearchWindow(QMainWindow):
                                 file_item.setCheckState(0, Qt.Unchecked)  # Add checkbox
                                 item.setCheckState(0, Qt.Unchecked)  # Add checkbox
                     except Exception as e:
-                        print(f"Failed to list files on share {share}: {e}")
+                        print(f"Failed to list files on share top:{ip} parent:{parent} share:{share}: {e}")
                         item.setBackground(0, Qt.red)
             elif conn.connect(ip, 139):  # 再尝试端口 139:
-                QMessageBox.information(self, "成功", f"连接到 {share or ip} 139 成功")
+                #QMessageBox.information(self, "成功", f"连接到 {share or ip} 139 成功")
+                show_auto_close_message(title="成功",text=f"连接到 {share or ip} 139 成功",window=self)
             else:
                 raise Exception("连接失败")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"连接失败: {e}")
+            #QMessageBox.critical(self, "错误", f"连接失败: {e}")
+            show_auto_close_message(title="错误",text=f"连接失败: {e}",window=self,icon=QMessageBox.Critical) # type: ignore
             logger.error(f'connect_share fail! {e}')
-            item.setBackground(0, Qt.red)
-
+            item.setBackground(0, Qt.red) # type: ignore
+    
     def delete_item(self, item):
         # Remove the selected item from the tree
         parent = item.parent()
+        logger.warning(f'{LOG_TAG} delete_item {item.text(0)}')
         if parent:
             parent.removeChild(item)
         else:
             index = self.ui.treeWidget_sharelist.indexOfTopLevelItem(item)
             self.ui.treeWidget_sharelist.takeTopLevelItem(index)
-
+    
+    def remove_all_children(self,parent_item):
+        """删除 parent_item 的所有子节点"""
+        logger.warning(f'{LOG_TAG} remove_all_children {parent_item.text(0)}')
+        
+        children = parent_item.takeChildren()  # 移除所有子节点并返回列表
+        if children:
+            for child in children:  # 彻底删除子节点（防止内存泄漏）
+                del child
+    
+    def remove_children_one_by_one(self,parent_item):
+        """逐个删除 parent_item 的子节点"""
+        logger.warning(f'{LOG_TAG} remove_children_one_by_one {parent_item.text(0)}')
+        
+        for i in reversed(range(parent_item.childCount())):  # 从后往前删
+            child = parent_item.child(i)
+            parent_item.removeChild(child)  # 从父节点移除
+            del child  # 彻底删除
+    
     def on_item_double_clicked(self, item, column):
         # Double-click to connect
         if item.parent():
