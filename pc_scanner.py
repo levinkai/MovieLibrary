@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-14 17:59:09
+LastEditTime: 2025-05-14 18:22:21
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -37,6 +37,9 @@ import requests
 import json
 
 from ui_search_share import Ui_SearchWindow
+
+# from queue import Queue
+from threading import Thread, Lock
 
 LOG_TAG = '[SCANNER] '
 log_file = os.path.basename(__file__)
@@ -432,7 +435,88 @@ def show_auto_close_message(
         msg_box.setWindowModality(Qt.ApplicationModal)  # 独立应用模态 # type: ignore
 
     msg_box.exec()
-    
+def worker_with_os_walk(queue, tree_lock, video_exts, video_files, root_item):
+    """
+    Worker function to process directories using os.walk.
+    :param queue: Queue containing directories to process.
+    :param tree_lock: Lock for thread-safe tree updates.
+    :param video_exts: Set of video file extensions to filter.
+    :param video_files: Shared list to collect video file paths.
+    :param root_item: The root QTreeWidgetItem to attach items to.
+    """
+    while not queue.empty():
+        try:
+            current_path, parent_item = queue.get_nowait()
+        except Exception:
+            break
+
+        # Process the current directory using os.walk
+        for root, dirs, files in os.walk(current_path):
+            # Filter directories and files
+            dirs[:] = [d for d in dirs if not d.startswith(('.', '\\', '$'))]
+            files = [f for f in files if not f.startswith(('.', '\\', '$'))]
+
+            # Add directories to the tree and enqueue them for further processing
+            for d in dirs:
+                full_path = os.path.join(root, d)
+                with tree_lock:
+                    sub_item = QTreeWidgetItem(parent_item)
+                    sub_item.setText(0, d)
+                    sub_item.setCheckState(0, Qt.Unchecked)  # Add checkbox for directories
+                    sub_item.setBackground(0, Qt.NoBrush)  # Reset background color
+                queue.put((full_path, sub_item))
+
+            # Add files to the tree
+            for f in files:
+                full_path = os.path.join(root, f)
+                with tree_lock:
+                    sub_item = QTreeWidgetItem(parent_item)
+                    sub_item.setText(0, f)
+
+                # Check if the file is a video and add to the video_files list
+                if os.path.splitext(f)[1].lower() in video_exts:
+                    with tree_lock:
+                        video_files.append(full_path)
+
+            # Stop further recursion for this level since subdirectories are already handled
+            break
+
+        queue.task_done()
+
+
+def traverse_directory_with_os_walk(path, root_item, max_threads=4):
+    """
+    Traverse a directory using os.walk in a non-recursive way with multiple threads.
+    :param path: The root path to traverse.
+    :param root_item: The QTreeWidgetItem representing the root node.
+    :param max_threads: The maximum number of threads to use.
+    :return: A list of video file paths.
+    """
+    if not os.path.exists(path):
+        print(f"Path does not exist: {path}")
+        return []
+
+    video_exts = {'.rm', '.rmvb', '.mkv', '.mp3', '.wmv'}
+    video_files = []
+    queue = Queue()
+    tree_lock = Lock()
+
+    # Enqueue the root directory
+    queue.put((path, root_item))
+
+    # Start worker threads
+    threads = []
+    for _ in range(max_threads):
+        thread = Thread(target=worker_with_os_walk, args=(queue, tree_lock, video_exts, video_files, root_item))
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all threads to finish
+    for thread in threads:
+        thread.join()
+
+    return video_files
+
 class SearchWindow(QMainWindow):
     def __init__(self):
         super(SearchWindow, self).__init__()
@@ -622,41 +706,9 @@ class SearchWindow(QMainWindow):
                         if 'win32' == platform:
                             path = rf"\\{ip}\{share}"
                             if os.path.exists(path):
-                                video_exts = {'.rm', '.rmvb', '.mkv', '.mp3', '.wmv'}
-                                video_files = []
-                                dir_list = []
-                                file_list = []
-                                for root, dirs, files in os.walk(path):
-                                    # 1. 必须原地修改dirs以控制递归
-                                    dir_list[:] = [d for d in dirs if not d.startswith(('.', '\\', '$'))]
-                                    file_list[:] = [f for f in files if not f.startswith(('.', '\\', '$'))]
-                                    break
-                                
-                                for d in dir_list:
-                                    if d.startswith(('.', '\\', '$')):
-                                        continue
-                                    sub_item = QTreeWidgetItem(item)
-                                    sub_item.setText(0, d)
-                                    sub_item.setCheckState(0, Qt.Unchecked)  # type: ignore # Add checkbox for directories
-                                    sub_item.setBackground(0, Qt.NoBrush)  # type: ignore # Reset background color
-                                    
-                                    full_path = os.path.join(root, d)
-                                    print(full_path)
-                                        
-                                # 过滤文件并匹配扩展名
-                                for f in file_list:
-                                    if f.startswith(('.', '\\', '$')):
-                                        continue
-                                    
-                                    sub_item = QTreeWidgetItem(item)
-                                    sub_item.setText(0, f)
-                                    
-                                    full_path = os.path.join(root, f)
-                                    print(full_path)
-                                    
-                                    if os.path.splitext(f)[1].lower() in video_exts:
-                                        video_files.append(full_path)
-                        
+                                video_files = traverse_directory_with_os_walk(path, item)
+                                print("Video files:", video_files)
+                            
                         else:
                             self.list_files_recursive(conn, item, share, "/")
                     else:
