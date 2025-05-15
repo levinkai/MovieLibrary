@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-14 18:22:21
+LastEditTime: 2025-05-15 09:56:19
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -675,10 +675,11 @@ class SearchWindow(QMainWindow):
         share = item.text(0) if item.parent() else None
         username = '' if not self.share_map else self.share_map[ip].get('username', '')
         password = '' if not self.share_map else self.share_map[ip].get('password', '')
+        guest = False if not self.share_map else self.share_map[ip].get('guest', False)
         
-        logger.info(f'{LOG_TAG} Connecting to IP: {ip}, Username: {username}, Share: {share}')
+        logger.info(f'{LOG_TAG} Connecting to IP: {ip}, Username: {username}, Share: {share} guest:{guest}')
         
-        if not username:  # Prompt for credentials if not provided
+        if (not guest) and (not username):  # Prompt for credentials if not provided
             username, ok = QInputDialog.getText(self, "输入用户名", f"连接到 {ip} 的用户名：")
             if ok:
                 password, ok = QInputDialog.getText(self, "输入密码", f"连接到 {ip} 的密码：") # , QLineEdit.Password type: ignore
@@ -695,6 +696,10 @@ class SearchWindow(QMainWindow):
                 show_auto_close_message(title="成功", text=f"连接到 {ip} 成功", window=self)
                 item.setBackground(0, Qt.green)
                 
+                if username == '' or password == '':
+                    logger.info(f'{LOG_TAG} {ip} not need login')
+                    self.share_map[ip]['guest'] = True
+                    
                 # Clear existing children and refresh the tree structure
                 self.remove_all_children(item)
                 shares = conn.listShares()
