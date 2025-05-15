@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-15 17:47:58
+LastEditTime: 2025-05-15 18:15:15
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -35,6 +35,7 @@ import my_log#上级目录中的包
 from queue import Queue, Empty
 import requests
 import json
+import gzip
 
 from ui_search_share import Ui_SearchWindow
 
@@ -370,10 +371,10 @@ class ScanCaller(QRunnable):
                 except Exception as e:
                     logger.error(f'{LOG_TAG} scan error at {current_path}: {e}')
                 task_queue.task_done()
-
+        
         task_queue = Queue()
         task_queue.put(root_path)
-
+        
         # 使用线程池进行并发扫描
         max_workers = min(32, (os.cpu_count() or 1) * 5)
         with ThreadPoolExecutor(max_workers) as executor:
@@ -381,6 +382,21 @@ class ScanCaller(QRunnable):
                 executor.submit(scan_worker)
         
 DEFAULT_FILE_NAME = "result.json"
+
+def save_results_compressed(data, file_path=f'{DEFAULT_FILE_NAME}.gz'):
+    with gzip.open(file_path, 'wt', encoding='utf-8') as f:
+        json.dump(data, f, indent=None, separators=(',', ':'))  # 紧凑格式
+
+def load_results_compressed(file_path=f'{DEFAULT_FILE_NAME}.gz'):
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"{LOG_TAG} load_results_compressed failed: {e}")
+        return {}
+    
 def load_results(file_path=DEFAULT_FILE_NAME):
     """
     加载测试结果文件，如果不存在则创建一个空的测试结果文件。
@@ -482,8 +498,16 @@ class SearchWindow(QMainWindow):
         else:
             self.ui.statusbar.showMessage('初始化失败')
         
-        self.share_map = load_results()
-        
+        self.share_map = load_results_compressed()
+        self.need_save = False
+        if 'Last' in self.share_map:
+            last = self.share_map['Last']
+            if isinstance(last, str):
+                self.ui.statusbar.showMessage(f'上次扫描时间: {last}')
+                del self.share_map['Last']
+            else:
+                self.ui.statusbar.showMessage('上次扫描时间: None')
+                
         if self.share_map:
             self.on_scan_complete(self.share_map)
             
@@ -506,12 +530,15 @@ class SearchWindow(QMainWindow):
         if self.scan_caller:
             self.scan_caller.stop()
         
-        save_results(self.share_map)
+        if self.need_save:
+            self.share_map['last'] = time.ctime()
+            save_results_compressed(self.share_map)
         
         event.accept()#self.manager.show_window(WINDOW_TITLE.START)
         QCoreApplication.quit()
         
     def scan_shares(self):
+        self.need_save = True
         self.scan_caller.emitter.resultReady.connect(self.on_scan_complete)
         self.scan_caller.scan()
         self.ui.statusbar.showMessage(f'{time.ctime()} 扫描开始...')
@@ -654,7 +681,7 @@ class SearchWindow(QMainWindow):
                                 # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
                                 self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
                                 self.scan_caller.scan_folder_concurrent(path)
-                            
+                                self.need_save = True
                         else:
                             self.list_files_recursive(conn, item, share, "/")
                     else:
