@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-15 09:56:19
+LastEditTime: 2025-05-15 17:47:58
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -93,27 +93,6 @@ def get_ip_address():
     except Exception as e:
         print(f"[ERROR] 获取 IP 失败: {e}")
         return None
-    
-def get_local_subnet(ip=''):
-    try:
-        if not ip:
-            # 使用 ipconfig 获取所有网卡信息
-            result = subprocess.run(["ipconfig", "getifaddr", "en0"], stdout=subprocess.PIPE, text=True)
-            ip = result.stdout.strip()
-            
-            # 如果 en0 没有IP，尝试 en1（可能是Wi-Fi）
-            if not ip:
-                result = subprocess.run(["ipconfig", "getifaddr", "en1"], stdout=subprocess.PIPE, text=True)
-                ip = result.stdout.strip()
-            
-            if not ip or ip.startswith("127."):
-                raise RuntimeError("未能获取有效的本地 IP 地址")
-        
-        subnet = ".".join(ip.split(".")[:3]) + ".0/24"
-        return subnet
-
-    except Exception as e:
-        raise RuntimeError(f"获取本地子网失败: {e}")
 
 # 检测 SMB 端口是否开放
 def is_smb_open(ip):
@@ -314,11 +293,11 @@ class ScanCaller(QRunnable):
         local_ip = get_ip_address()
         results = {}
         print(f'{time.ctime()} _scan_network {local_ip}')
-
+        
         if local_ip:
             ip_prefix = ".".join(local_ip.split(".")[:3])
             ip_list = [f"{ip_prefix}.{i}" for i in range(1, 255)]
-
+            
             # 使用线程池进行并发扫描
             max_workers = min(32, (os.cpu_count() or 1) * 5)
             with ThreadPoolExecutor(max_workers) as executor:
@@ -362,7 +341,45 @@ class ScanCaller(QRunnable):
             print(f"{time.ctime()} _safe_request Exception: {e}")
             
             return ''
+        
+    def scan_folder_concurrent(self, root_path: str):
+        """
+        并发扫描整个目录结构，每扫描一个目录立即发射 folderScanned(path, structure)
+        """
+        self.result_queue = Queue()
+        
+        def scan_worker():
+            while True:
+                try:
+                    current_path = task_queue.get_nowait()
+                except:
+                    return
+                structure = {}
+                try:
+                    with os.scandir(current_path) as it:
+                        for entry in it:
+                            if entry.name.startswith('.') or entry.name.startswith('$'):
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                sub_path = os.path.join(current_path, entry.name)
+                                structure[entry.name] = {}
+                                task_queue.put(sub_path)
+                            else:
+                                structure.setdefault('__files__', []).append(entry.name)
+                    self.result_queue.put((current_path, structure))  # ✅ 放入结果队列
+                except Exception as e:
+                    logger.error(f'{LOG_TAG} scan error at {current_path}: {e}')
+                task_queue.task_done()
 
+        task_queue = Queue()
+        task_queue.put(root_path)
+
+        # 使用线程池进行并发扫描
+        max_workers = min(32, (os.cpu_count() or 1) * 5)
+        with ThreadPoolExecutor(max_workers) as executor:
+            for _ in range(8):
+                executor.submit(scan_worker)
+        
 DEFAULT_FILE_NAME = "result.json"
 def load_results(file_path=DEFAULT_FILE_NAME):
     """
@@ -435,87 +452,6 @@ def show_auto_close_message(
         msg_box.setWindowModality(Qt.ApplicationModal)  # 独立应用模态 # type: ignore
 
     msg_box.exec()
-def worker_with_os_walk(queue, tree_lock, video_exts, video_files, root_item):
-    """
-    Worker function to process directories using os.walk.
-    :param queue: Queue containing directories to process.
-    :param tree_lock: Lock for thread-safe tree updates.
-    :param video_exts: Set of video file extensions to filter.
-    :param video_files: Shared list to collect video file paths.
-    :param root_item: The root QTreeWidgetItem to attach items to.
-    """
-    while not queue.empty():
-        try:
-            current_path, parent_item = queue.get_nowait()
-        except Exception:
-            break
-
-        # Process the current directory using os.walk
-        for root, dirs, files in os.walk(current_path):
-            # Filter directories and files
-            dirs[:] = [d for d in dirs if not d.startswith(('.', '\\', '$'))]
-            files = [f for f in files if not f.startswith(('.', '\\', '$'))]
-
-            # Add directories to the tree and enqueue them for further processing
-            for d in dirs:
-                full_path = os.path.join(root, d)
-                with tree_lock:
-                    sub_item = QTreeWidgetItem(parent_item)
-                    sub_item.setText(0, d)
-                    sub_item.setCheckState(0, Qt.Unchecked)  # Add checkbox for directories
-                    sub_item.setBackground(0, Qt.NoBrush)  # Reset background color
-                queue.put((full_path, sub_item))
-
-            # Add files to the tree
-            for f in files:
-                full_path = os.path.join(root, f)
-                with tree_lock:
-                    sub_item = QTreeWidgetItem(parent_item)
-                    sub_item.setText(0, f)
-
-                # Check if the file is a video and add to the video_files list
-                if os.path.splitext(f)[1].lower() in video_exts:
-                    with tree_lock:
-                        video_files.append(full_path)
-
-            # Stop further recursion for this level since subdirectories are already handled
-            break
-
-        queue.task_done()
-
-
-def traverse_directory_with_os_walk(path, root_item, max_threads=4):
-    """
-    Traverse a directory using os.walk in a non-recursive way with multiple threads.
-    :param path: The root path to traverse.
-    :param root_item: The QTreeWidgetItem representing the root node.
-    :param max_threads: The maximum number of threads to use.
-    :return: A list of video file paths.
-    """
-    if not os.path.exists(path):
-        print(f"Path does not exist: {path}")
-        return []
-
-    video_exts = {'.rm', '.rmvb', '.mkv', '.mp3', '.wmv'}
-    video_files = []
-    queue = Queue()
-    tree_lock = Lock()
-
-    # Enqueue the root directory
-    queue.put((path, root_item))
-
-    # Start worker threads
-    threads = []
-    for _ in range(max_threads):
-        thread = Thread(target=worker_with_os_walk, args=(queue, tree_lock, video_exts, video_files, root_item))
-        thread.start()
-        threads.append(thread)
-
-    # Wait for all threads to finish
-    for thread in threads:
-        thread.join()
-
-    return video_files
 
 class SearchWindow(QMainWindow):
     def __init__(self):
@@ -551,6 +487,10 @@ class SearchWindow(QMainWindow):
         if self.share_map:
             self.on_scan_complete(self.share_map)
             
+        self.result_timer = QTimer(self)
+        self.result_timer.timeout.connect(self.process_folder_result)
+        self.result_timer.start(100)  # 每100ms处理一个目录
+
     def showEvent(self, event):
         print(f"{self.windowTitle()} showEvent")
         super().showEvent(event)
@@ -711,8 +651,9 @@ class SearchWindow(QMainWindow):
                         if 'win32' == platform:
                             path = rf"\\{ip}\{share}"
                             if os.path.exists(path):
-                                video_files = traverse_directory_with_os_walk(path, item)
-                                print("Video files:", video_files)
+                                # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
+                                self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
+                                self.scan_caller.scan_folder_concurrent(path)
                             
                         else:
                             self.list_files_recursive(conn, item, share, "/")
@@ -725,55 +666,82 @@ class SearchWindow(QMainWindow):
                 show_auto_close_message(title="成功", text=f"连接到 {ip} 成功 (端口 139)", window=self)
             else:
                 raise Exception("无法连接到 SMB 服务")
-
+        
         except Exception as e:
             logger.error(f"{LOG_TAG} Failed to connect to {ip}: {e}")
             show_auto_close_message(title="错误", text=f"连接失败: {e}", window=self, icon=QMessageBox.Critical) # type: ignore
             item.setBackground(0, Qt.red) # type: ignore
-    
-    def list_files_recursive(self, conn, parent_item, share, current_path):
-        """
-        Recursively list files and directories in a shared path and populate QTreeWidgetItem.
-        :param conn: SMBConnection object
-        :param parent_item: QTreeWidgetItem parent node
-        :param share: SMB share name
-        :param current_path: Current directory path in the share
-        """
-        try:
-            # Strip leading and trailing slashes for consistency
-            current_path = current_path.strip("\\").strip("/")
-            logger.info(f'{LOG_TAG} list_files_recursive try conn.listPath({share}, {current_path})')
-
-            # Fetch the list of files and directories in the current path
-            files = conn.listPath(share, current_path if current_path else "/")
             
-            for file in files:
-                logger.info(f'{LOG_TAG} {file.filename}|{"文件夹" if file.isDirectory else "文件"}')
-                
-                # Skip special entries and hidden directories
-                if file.filename.startswith(('.', '\\', '$')):
-                    continue
-                
-                # Create a tree item for the file or directory
-                file_item = QTreeWidgetItem(parent_item)
-                file_item.setText(0, file.filename)
-                file_item.setText(1, "文件夹" if file.isDirectory else "文件")
-                
-                if file.isDirectory:
-                    file_item.setCheckState(0, Qt.Unchecked)  # type: ignore # Add checkbox for directories
-                    file_item.setBackground(0, Qt.NoBrush)  # type: ignore # Reset background color
-                    
-                    # Build the next path for the recursive call
-                    next_path = f"{current_path}/{file.filename}" if current_path else file.filename
-                    logger.info(f'{LOG_TAG} next share:{share} path:{next_path}')
-                    
-                    # Recursively list the contents of the directory
-                    self.list_files_recursive(conn, file_item, share, next_path)
-        
-        except Exception as e:
-            logger.error(f"Failed to list path {current_path} in share {share}: {e}")
-            show_auto_close_message(title="错误", text=f"Failed to list path {current_path} in share {share}: {e}", window=self, icon=QMessageBox.Critical)  # type: ignore
+    def on_folder_scanned(self, result):
+        if 'folder' in result:
+            path, structure = result['folder']
+            logger.info(f'{LOG_TAG} folder scanned: {path}')
+            
+            self.share_map[path] = structure
+            self.add_structure_to_tree(path, structure)
     
+    def add_structure_to_tree(self, base_path, structure, parent_item=None):
+        top_level_parent = self.get_top_level_parent(self.ui.treeWidget_sharelist.currentItem())
+        
+        """
+        根据 base_path 从顶层依次查找或创建节点，并将 structure 添加进去。
+        """
+        logger.info(f'{LOG_TAG} add_structure_to_tree base_path:{base_path} structure len:{len(structure)}|{top_level_parent.text((0))}')
+        
+        # 提取路径层级（兼容 SMB 路径）
+        parts = base_path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
+        if not parts:
+            return
+        
+        # 依次定位或创建节点
+        root = self.ui.treeWidget_sharelist
+        current_item = None
+        
+        for i, part in enumerate(parts):
+            found = False
+            items = root.findItems(part, Qt.MatchExactly, 0) if current_item is None else [
+                current_item.child(j) for j in range(current_item.childCount()) if current_item.child(j).text(0) == part
+            ]
+            for item in items:
+                if item.text(0) == part:
+                    current_item = item
+                    found = True
+                    break
+            if not found:
+                new_item = QTreeWidgetItem([part])
+                new_item.setCheckState(0, Qt.Unchecked)  # type: ignore
+                new_item.setBackground(0, Qt.NoBrush)    # type: ignore
+                if current_item is None:
+                    root.addTopLevelItem(new_item)
+                else:
+                    current_item.addChild(new_item)
+                current_item = new_item
+        
+        # 添加结构（结构只加一层）
+        for name, content in structure.items():
+            if name == '__files__':
+                for fname in content:
+                    file_item = QTreeWidgetItem(current_item)
+                    file_item.setText(0, fname)
+                    file_item.setText(1, "文件")
+            else:
+                folder_item = QTreeWidgetItem(current_item)
+                folder_item.setText(0, name)
+                folder_item.setText(1, "文件夹")
+                folder_item.setCheckState(0, Qt.Unchecked)  # type: ignore
+                folder_item.setBackground(0, Qt.NoBrush)    # type: ignore
+                
+    def process_folder_result(self):
+        if hasattr(self.scan_caller, 'result_queue'):
+            try:
+                path, structure = self.scan_caller.result_queue.get_nowait()
+                logger.info(f'{LOG_TAG} process_folder_result {path}')
+                self.share_map[path] = structure
+                self.ui.statusbar.showMessage(f"{time.ctime()} 更新路径 {path}...")
+                self.add_structure_to_tree(path, structure)
+            except Empty:
+                self.result_timer.start(1000)
+            
     def delete_item(self, item):
         # Remove the selected item from the tree
         parent = item.parent()
