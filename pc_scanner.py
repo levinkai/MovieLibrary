@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-15 18:15:15
+LastEditTime: 2025-05-16 14:25:01
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -490,6 +490,14 @@ class SearchWindow(QMainWindow):
         self.scan_caller = ScanCaller(self.signal_emitter)
         QThreadPool.globalInstance().start(self.scan_caller)
         
+        self.result_timer = QTimer(self)
+        self.result_timer.timeout.connect(self.process_folder_result)
+        self.result_timer.start(100)  # 每100ms处理一个目录
+        
+        self.share_task_queue = Queue()
+        self.share_update_timer = QTimer(self)
+        self.share_update_timer.timeout.connect(self.process_share_task)
+        
         self.ui.lineEdit_ip.setText(f'{local_ip}')
         self.ui.lineEdit_subnet.setText(f'{ip_prefix}')
         self.ui.pushButton_search.clicked.connect(partial(self.scan_shares))
@@ -500,20 +508,16 @@ class SearchWindow(QMainWindow):
         
         self.share_map = load_results_compressed()
         self.need_save = False
-        if 'Last' in self.share_map:
-            last = self.share_map['Last']
+        if 'last' in self.share_map:
+            last = self.share_map['last']
             if isinstance(last, str):
                 self.ui.statusbar.showMessage(f'上次扫描时间: {last}')
-                del self.share_map['Last']
+                del self.share_map['last']
             else:
                 self.ui.statusbar.showMessage('上次扫描时间: None')
                 
         if self.share_map:
             self.on_scan_complete(self.share_map)
-            
-        self.result_timer = QTimer(self)
-        self.result_timer.timeout.connect(self.process_folder_result)
-        self.result_timer.start(100)  # 每100ms处理一个目录
 
     def showEvent(self, event):
         print(f"{self.windowTitle()} showEvent")
@@ -563,13 +567,60 @@ class SearchWindow(QMainWindow):
             if isinstance(result,dict):
                 self.share_map = result
                 for ip, data in result.items(): 
-                    self.add_to_tree(ip, data)
+                    # self.add_to_tree(ip, data)
+                    if 'last' == ip:
+                        continue
                     
+                    ip_item = self._add_ip_node(ip, data)
+                    if ip_item is None:
+                        logger.error(f'{LOG_TAG} add ip item fail! {ip}')
+                        continue
+                    else:
+                        logger.info(f'{LOG_TAG} add ip item {ip}|{ip_item.text(0)}')
+                        
+                    shares = data.get('shares')
+                    if isinstance(shares, dict):
+                        for share_name, tree_structure in shares.items():
+                            share_path = f"{ip}\\{share_name}" if ip not in share_name else share_name
+                            self.share_task_queue.put((share_path, tree_structure))
+                    elif isinstance(shares, list):
+                        for share in shares:
+                            share_item = QTreeWidgetItem(ip_item)
+                            share_item.setText(0, share)
+                            share_item.setText(1, "")
+                    elif isinstance(shares, str):
+                        error_item = QTreeWidgetItem(ip_item)
+                        error_item.setText(0, shares)
+                        error_item.setBackground(0, Qt.red)  # type: ignore
+                self.share_update_timer.start(50)  # 每 50ms 插入几项
+        
     def get_top_level_parent(self,item):
         """获取最顶层的父项（如果 item 本身就是顶层，则返回自身）"""
         while item.parent() is not None:  # 只要还有父项，就继续向上查找
             item = item.parent()
         return item
+    
+    def get_ip_item(self,ip):
+        """获取 IP 节点"""
+        root = self.ui.treeWidget_sharelist
+        for i in range(root.topLevelItemCount()):
+            item = root.topLevelItem(i)
+            if item.text(0) == ip:
+                return item
+        return None
+    
+    def _add_ip_node(self, ip, data):
+        root = self.ui.treeWidget_sharelist
+        for i in range(root.topLevelItemCount()):
+            item = root.topLevelItem(i)
+            if item.text(0) == ip:
+                return item  # 已存在
+        
+        ip_item = QTreeWidgetItem(self.ui.treeWidget_sharelist)
+        ip_item.setText(0, ip)
+        ip_item.setText(1, data.get('name', 'Unknown'))
+        ip_item.setCheckState(0, Qt.Unchecked)  # type: ignore
+        return ip_item
     
     def add_to_tree(self, ip, data):
         # Check if the IP node already exists
@@ -708,7 +759,7 @@ class SearchWindow(QMainWindow):
             self.add_structure_to_tree(path, structure)
     
     def add_structure_to_tree(self, base_path, structure, parent_item=None):
-        top_level_parent = self.get_top_level_parent(self.ui.treeWidget_sharelist.currentItem())
+        top_level_parent =  parent_item if parent_item is not None else self.get_top_level_parent(self.ui.treeWidget_sharelist.currentItem())
         
         """
         根据 base_path 从顶层依次查找或创建节点，并将 structure 添加进去。
@@ -758,17 +809,54 @@ class SearchWindow(QMainWindow):
                 folder_item.setCheckState(0, Qt.Unchecked)  # type: ignore
                 folder_item.setBackground(0, Qt.NoBrush)    # type: ignore
                 
+    def save_folder_structure(self, path, structure):
+        # 提取路径层级（兼容 SMB 路径）
+        parts = path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
+        if not parts:
+            return
+        
+        for i, part in enumerate(parts):
+            logger.info(f'{LOG_TAG} save_folder_structure part:{part}')
+            if part in self.share_map and 'shares' in self.share_map[part]:
+                try:
+                    if not isinstance(self.share_map[part]['shares'],dict):
+                        self.share_map[part]['shares'] = {}
+                    self.share_map[part]['shares'][path] = structure
+                    break
+                except Exception as e:
+                    logger.error(f'{LOG_TAG} save_folder_structure error: {e}')
+                    raise SystemError(f'{LOG_TAG} save_folder_structure error: {e}')
     def process_folder_result(self):
         if hasattr(self.scan_caller, 'result_queue'):
             try:
                 path, structure = self.scan_caller.result_queue.get_nowait()
                 logger.info(f'{LOG_TAG} process_folder_result {path}')
-                self.share_map[path] = structure
+                self.save_folder_structure(path, structure)
                 self.ui.statusbar.showMessage(f"{time.ctime()} 更新路径 {path}...")
                 self.add_structure_to_tree(path, structure)
             except Empty:
                 self.result_timer.start(1000)
-            
+                
+    def process_share_task(self):
+        processed = 0
+        while not self.share_task_queue.empty() and processed < 5:  # 一次处理最多5个
+            try:
+                path, structure = self.share_task_queue.get_nowait()
+                self.ui.statusbar.showMessage(f"{time.ctime()} 初始化路径 {path}...")
+                ip = path.strip('\\').split('\\')[0]
+                parent_ip = self.get_ip_item(ip)
+                logger.info(f'{LOG_TAG} process_share_task {path} {parent_ip.text(0)}')
+                if parent_ip is None:
+                    logger.error(f'{LOG_TAG} process_share_task error: {path} not found in tree')
+                    continue
+                self.add_structure_to_tree(base_path=path, structure=structure,parent_item=parent_ip)
+                processed += 1
+            except Exception as e:
+                logger.error(f"{LOG_TAG} process_share_task error: {e}")
+        
+        if self.share_task_queue.empty():
+            self.share_update_timer.stop()
+        
     def delete_item(self, item):
         # Remove the selected item from the tree
         parent = item.parent()
