@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-16 14:25:01
+LastEditTime: 2025-05-16 17:56:33
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -343,28 +343,33 @@ class ScanCaller(QRunnable):
             
             return ''
         
-    def scan_folder_concurrent(self, root_path: str):
+    def scan_folder_concurrent(self, root_path: str, max_depth: int = 3):
         """
         并发扫描整个目录结构，每扫描一个目录立即发射 folderScanned(path, structure)
         """
         self.result_queue = Queue()
-        
+        task_queue = Queue()
+        task_queue.put((root_path, 0))  # 添加初始深度
+
         def scan_worker():
             while True:
                 try:
-                    current_path = task_queue.get_nowait()
+                    current_path, current_depth = task_queue.get_nowait()
                 except:
                     return
                 structure = {}
                 try:
                     with os.scandir(current_path) as it:
                         for entry in it:
-                            if entry.name.startswith('.') or entry.name.startswith('$'):
+                            if entry.name.startswith(('.','$')):
                                 continue
                             if entry.is_dir(follow_symlinks=False):
-                                sub_path = os.path.join(current_path, entry.name)
-                                structure[entry.name] = {}
-                                task_queue.put(sub_path)
+                                if current_depth + 1 <= max_depth:
+                                    structure[entry.name] = {}
+                                    task_queue.put((entry.path, current_depth + 1))
+                                else:
+                                    logger.warning(f'{LOG_TAG} {current_path} 目录层级过深，未扫描: {entry.name}')
+                                    structure[entry.name] = {'__files__': '层级较深，未扫描'}
                             else:
                                 structure.setdefault('__files__', []).append(entry.name)
                     self.result_queue.put((current_path, structure))  # ✅ 放入结果队列
@@ -372,14 +377,15 @@ class ScanCaller(QRunnable):
                     logger.error(f'{LOG_TAG} scan error at {current_path}: {e}')
                 task_queue.task_done()
         
-        task_queue = Queue()
-        task_queue.put(root_path)
-        
         # 使用线程池进行并发扫描
-        max_workers = min(32, (os.cpu_count() or 1) * 5)
-        with ThreadPoolExecutor(max_workers) as executor:
-            for _ in range(8):
-                executor.submit(scan_worker)
+        max_workers = min(32, (os.cpu_count() or 1) * 6)
+        # with ThreadPoolExecutor(max_workers) as executor:
+        #     for _ in range(8):
+        #         executor.submit(scan_worker)
+        # 启动后台线程池（非阻塞）
+        self._executor = ThreadPoolExecutor(max_workers)
+        for _ in range(8):
+            self._executor.submit(scan_worker)
         
 DEFAULT_FILE_NAME = "result.json"
 
@@ -605,15 +611,22 @@ class SearchWindow(QMainWindow):
         root = self.ui.treeWidget_sharelist
         for i in range(root.topLevelItemCount()):
             item = root.topLevelItem(i)
-            if item.text(0) == ip:
+            if item.text(0) == ip: # type: ignore
                 return item
         return None
+    
+    def get_item_path(self,item) -> str:
+        parts = []
+        while item:
+            parts.insert(0, item.text(0))  # 从头插入，保持路径顺序
+            item = item.parent()
+        return "\\".join(parts)
     
     def _add_ip_node(self, ip, data):
         root = self.ui.treeWidget_sharelist
         for i in range(root.topLevelItemCount()):
             item = root.topLevelItem(i)
-            if item.text(0) == ip:
+            if item.text(0) == ip: # type: ignore
                 return item  # 已存在
         
         ip_item = QTreeWidgetItem(self.ui.treeWidget_sharelist)
@@ -720,25 +733,38 @@ class SearchWindow(QMainWindow):
                     
                 # Clear existing children and refresh the tree structure
                 self.remove_all_children(item)
-                shares = conn.listShares()
-                shares = [s.name for s in shares if not s.isSpecial and s.name not in ['NETLOGON', 'SYSVOL']]
-                for share in shares:
-                    if share:
-                        item = QTreeWidgetItem(topitem)
-                        item.setText(0, share)
-                        if 'win32' == platform:
-                            path = rf"\\{ip}\{share}"
-                            if os.path.exists(path):
-                                # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
-                                self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
-                                self.scan_caller.scan_folder_concurrent(path)
-                                self.need_save = True
+                if item.text(0) == ip:
+                    shares = conn.listShares()
+                    shares = [s.name for s in shares if not s.isSpecial and s.name not in ['NETLOGON', 'SYSVOL']]
+                    for share in shares:
+                        if share:
+                            item = QTreeWidgetItem(topitem)
+                            item.setText(0, share)
+                            if 'win32' == platform:
+                                path = rf"\\{ip}\{share}"
+                                if os.path.exists(path):
+                                    # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
+                                    self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
+                                    self.scan_caller.scan_folder_concurrent(path)
+                                    self.need_save = True
+                            else:
+                                self.list_files_recursive(conn, item, share, "/")
                         else:
-                            self.list_files_recursive(conn, item, share, "/")
+                            logger.info(f"{LOG_TAG} {ip} has no shares!")
+                            show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
+                else:
+                    path = self.get_item_path(item)
+                    if not path.startswith('\\\\'):
+                        path = rf"\\{path}"
+                    logger.info(f'{LOG_TAG} research directory ip:{ip} share:{share} path:{path}')
+                    if os.path.exists(path):
+                        item.setText(1, "文件夹")
+                        self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
+                        self.scan_caller.scan_folder_concurrent(path)
+                        self.need_save = True
                     else:
-                        logger.info(f"{LOG_TAG} {ip} has no shares!")
-                        show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
-                
+                        logger.error(f'{LOG_TAG} 目录不存在: {path}')
+                        show_auto_close_message(title="错误", text=f"目录不存在: {path}", window=self, icon=QMessageBox.Critical) # type: ignore
             elif conn.connect(ip, 139):
                 logger.info(f"{LOG_TAG} Connected to {ip} via port 139")
                 show_auto_close_message(title="成功", text=f"连接到 {ip} 成功 (端口 139)", window=self)
@@ -777,7 +803,7 @@ class SearchWindow(QMainWindow):
         
         for i, part in enumerate(parts):
             found = False
-            items = root.findItems(part, Qt.MatchExactly, 0) if current_item is None else [
+            items = root.findItems(part, Qt.MatchExactly, 0) if current_item is None else [ # type: ignore
                 current_item.child(j) for j in range(current_item.childCount()) if current_item.child(j).text(0) == part
             ]
             for item in items:
@@ -808,7 +834,26 @@ class SearchWindow(QMainWindow):
                 folder_item.setText(1, "文件夹")
                 folder_item.setCheckState(0, Qt.Unchecked)  # type: ignore
                 folder_item.setBackground(0, Qt.NoBrush)    # type: ignore
-                
+                if isinstance(content, dict) and '__files__' in content:
+                    files = content['__files__']
+                    if isinstance(files,str):
+                        name = "文件夹（未扫描）"
+                        folder_item.setText(1, name)
+                        folder_item.setBackground(0, Qt.yellow) # type: ignore
+                        
+                        file_item = QTreeWidgetItem(folder_item)
+                        file_item.setText(0, name)
+                        file_item.setText(1, name)
+                        file_item.setBackground(0, Qt.yellow) # type: ignore
+                        
+                    elif isinstance(files, list):
+                        for fname in files:
+                            file_item = QTreeWidgetItem(folder_item)
+                            file_item.setText(0, fname)
+                            file_item.setText(1, "文件")
+                            if '层级较深，未扫描' == fname:
+                                folder_item.setText(1, "文件夹（未扫描）")
+                                folder_item.setBackground(0, Qt.yellow) # type: ignore
     def save_folder_structure(self, path, structure):
         # 提取路径层级（兼容 SMB 路径）
         parts = path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
@@ -845,7 +890,7 @@ class SearchWindow(QMainWindow):
                 self.ui.statusbar.showMessage(f"{time.ctime()} 初始化路径 {path}...")
                 ip = path.strip('\\').split('\\')[0]
                 parent_ip = self.get_ip_item(ip)
-                logger.info(f'{LOG_TAG} process_share_task {path} {parent_ip.text(0)}')
+                logger.info(f'{LOG_TAG} process_share_task {path} {parent_ip.text(0)}') # type: ignore
                 if parent_ip is None:
                     logger.error(f'{LOG_TAG} process_share_task error: {path} not found in tree')
                     continue
