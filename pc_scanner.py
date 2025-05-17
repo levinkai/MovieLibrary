@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-17 09:40:44
+LastEditTime: 2025-05-17 09:59:04
 FilePath: \\Work\\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -75,22 +75,10 @@ def get_ip_address():
                     if key in adapter:
                         return ip
         else:
-            # Linux/macOS
-            output = subprocess.check_output("ifconfig", encoding="utf-8")
-            blocks = output.split("\n\n")
-            
-            ip_list = {}
-            for block in blocks:
-                if "inet " in block and "127.0.0.1" not in block:
-                    iface = block.split(":")[0].strip()
-                    ip_match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", block)
-                    if ip_match:
-                        ip_list[iface] = ip_match.group(1)
-            
-            for prefer_iface in ["eth0", "en0", "wlan0"]:
-                if prefer_iface in ip_list:
-                    return ip_list[prefer_iface]
-            return next(iter(ip_list.values()), None)
+            # Get the first 192.* IP address using awk
+            cmd = "ifconfig | awk '/inet / && !/127.0.0.1/ && /192\\./{print $2; exit}'"
+            ip = subprocess.check_output(cmd, shell=True, encoding='utf-8').strip()
+            return ip if ip else None
     except Exception as e:
         print(f"[ERROR] 获取 IP 失败: {e}")
         return None
