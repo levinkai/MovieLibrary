@@ -1,8 +1,8 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-16 17:56:33
-FilePath: \\MovieLibrary\\pc_scanner.py
+LastEditTime: 2025-05-17 09:40:44
+FilePath: \\Work\\MovieLibrary\\pc_scanner.py
 '''
 import sys
 import os
@@ -825,11 +825,11 @@ class SearchWindow(QMainWindow):
         for name, content in structure.items():
             if name == '__files__':
                 for fname in content:
-                    file_item = QTreeWidgetItem(current_item)
+                    file_item = QTreeWidgetItem(current_item) # type: ignore
                     file_item.setText(0, fname)
                     file_item.setText(1, "文件")
             else:
-                folder_item = QTreeWidgetItem(current_item)
+                folder_item = QTreeWidgetItem(current_item) # type: ignore
                 folder_item.setText(0, name)
                 folder_item.setText(1, "文件夹")
                 folder_item.setCheckState(0, Qt.Unchecked)  # type: ignore
