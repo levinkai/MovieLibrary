@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-17 09:59:04
+LastEditTime: 2025-05-18 21:42:18
 FilePath: \\Work\\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -736,7 +736,20 @@ class SearchWindow(QMainWindow):
                                     self.scan_caller.scan_folder_concurrent(path)
                                     self.need_save = True
                             else:
-                                self.list_files_recursive(conn, item, share, "/")
+                                #1 linux macos 挂载到本地，名称为share
+                                try:
+                                    pass
+                                except Exception as e:
+                                    logger.error(f'{LOG_TAG} mount share fail! {e}')
+                                    show_auto_close_message(title="错误", text=f"挂载失败: {e}", window=self, icon=QMessageBox.Critical)
+                                #2 生成路径
+                                path = ''
+                                #3 扫描
+                                if os.path.exists(path):
+                                    # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
+                                    self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
+                                    self.scan_caller.scan_folder_concurrent(path)
+                                    self.need_save = True
                         else:
                             logger.info(f"{LOG_TAG} {ip} has no shares!")
                             show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
