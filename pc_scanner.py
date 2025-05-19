@@ -1,8 +1,8 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-18 21:42:18
-FilePath: \\Work\\MovieLibrary\\pc_scanner.py
+LastEditTime: 2025-05-19 16:32:55
+FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
 import os
@@ -40,7 +40,7 @@ import gzip
 from ui_search_share import Ui_SearchWindow
 
 # from queue import Queue
-from threading import Thread, Lock
+from smb_disk import mount_smb_share, unmount_smb_share
 
 LOG_TAG = '[SCANNER] '
 log_file = os.path.basename(__file__)
@@ -331,14 +331,17 @@ class ScanCaller(QRunnable):
             
             return ''
         
-    def scan_folder_concurrent(self, root_path: str, max_depth: int = 3):
+    def scan_folder_concurrent(self, ip: str, root_path: str, max_depth: int = 3):
         """
-        并发扫描整个目录结构，每扫描一个目录立即发射 folderScanned(path, structure)
+        并发扫描整个目录结构，每扫描一个目录立即发射 folderScanned(ip, path, structure)
         """
         self.result_queue = Queue()
         task_queue = Queue()
         task_queue.put((root_path, 0))  # 添加初始深度
-
+        max_depth = max_depth if max_depth > 0 else 3
+        ip = ip if ip else root_path
+        print(f'{time.ctime()} scan_folder_concurrent root_path:{root_path} ip:{ip} max_depth:{max_depth}')
+        
         def scan_worker():
             while True:
                 try:
@@ -360,7 +363,7 @@ class ScanCaller(QRunnable):
                                     structure[entry.name] = {'__files__': '层级较深，未扫描'}
                             else:
                                 structure.setdefault('__files__', []).append(entry.name)
-                    self.result_queue.put((current_path, structure))  # ✅ 放入结果队列
+                    self.result_queue.put((ip, current_path, structure))  # ✅ 放入结果队列
                 except Exception as e:
                     logger.error(f'{LOG_TAG} scan error at {current_path}: {e}')
                 task_queue.task_done()
@@ -579,7 +582,7 @@ class SearchWindow(QMainWindow):
                             self.share_task_queue.put((share_path, tree_structure))
                     elif isinstance(shares, list):
                         for share in shares:
-                            share_item = QTreeWidgetItem(ip_item)
+                            share_item = QTreeWidgetItem(ip_item) # type: ignore
                             share_item.setText(0, share)
                             share_item.setText(1, "")
                     elif isinstance(shares, str):
@@ -603,12 +606,56 @@ class SearchWindow(QMainWindow):
                 return item
         return None
     
-    def get_item_path(self,item) -> str:
+    def get_item_path(self, item) -> str:
+        '''
+        1. smb path :
+            item:
+            192.168.1.141
+                pi
+                    test
+                        test1
+                            test2
+                                test3
+            path:
+            '\\\\192.168.1.141\\pi\\test\\test1\\test2\\test3'
+            
+            2. mount path:
+                item:
+                192.168.1.141
+                    I:
+                        test
+                            test1
+                                test2
+                                    test3
+                path:
+                'I:\\test\\test1\\test2\\test3'
+        '''
         parts = []
-        while item:
-            parts.insert(0, item.text(0))  # 从头插入，保持路径顺序
-            item = item.parent()
-        return "\\".join(parts)
+        current = item
+        while current:
+            parts.insert(0, current.text(0))
+            current = current.parent()
+        
+        if len(parts) < 2:
+            return "\\".join(parts)
+        
+        ip = parts[0]
+        second = parts[1]
+        logger.info(f"{LOG_TAG} get_item_path ip:{ip} second:{second}")
+        
+        ip_pattern = r"^\d{1,3}(\.\d{1,3}){3}$"
+        if not re.match(ip_pattern, ip):
+            logger.error(f"{LOG_TAG} Invalid IP address: {ip}")
+            return ""
+        
+        # 判断是否为 Windows 挂载盘符路径
+        if re.fullmatch(r"[A-Z]:", second):
+            drive_letter = second
+            sub_path = "\\".join(parts[2:]) if len(parts) > 2 else ""
+            return f"{drive_letter}\\{sub_path}" if sub_path else f"{drive_letter}\\"
+
+        # 否则为 SMB 路径
+        return r"\\\\" + r"\\".join(parts)
     
     def _add_ip_node(self, ip, data):
         root = self.ui.treeWidget_sharelist
@@ -680,6 +727,8 @@ class SearchWindow(QMainWindow):
             delete_action = menu.addAction("删除")
             action = menu.exec_(self.ui.treeWidget_sharelist.viewport().mapToGlobal(position))
             if action == connect_action:
+                if '未扫描' in item.text(0):
+                    item = item.parent()
                 self.connect_share(item)
             elif action == delete_action:
                 self.delete_item(item)
@@ -729,27 +778,29 @@ class SearchWindow(QMainWindow):
                             item = QTreeWidgetItem(topitem)
                             item.setText(0, share)
                             if 'win32' == platform:
-                                path = rf"\\{ip}\{share}"
-                                if os.path.exists(path):
-                                    # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
+                                smb_path = f"\\\\{ip}\\{share}"
+                                path = mount_smb_share(ip,share,username,password)#rf"\\{ip}\{share}"
+                                if path and os.path.exists(path):
+                                    # if smb_path not in self.share_map[ip]:
+                                    #     self.share_map[ip][smb_path] = {}
+                                    # if path not in self.share_map[ip][smb_path]:
+                                    #     self.share_map[ip][smb_path][path] = {}
                                     self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
-                                    self.scan_caller.scan_folder_concurrent(path)
-                                    self.need_save = True
+                                    self.scan_caller.scan_folder_concurrent(ip,path)
+                                    # self.need_save = True
                             else:
                                 #1 linux macos 挂载到本地，名称为share
+                                #2 生成路径
+                                #3 扫描
                                 try:
-                                    pass
+                                    path = mount_smb_share(ip,share,username,password)
                                 except Exception as e:
                                     logger.error(f'{LOG_TAG} mount share fail! {e}')
                                     show_auto_close_message(title="错误", text=f"挂载失败: {e}", window=self, icon=QMessageBox.Critical)
-                                #2 生成路径
-                                path = ''
-                                #3 扫描
                                 if os.path.exists(path):
-                                    # self.scan_caller.emitter.resultReady.connect(self.on_folder_scanned)
                                     self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
-                                    self.scan_caller.scan_folder_concurrent(path)
-                                    self.need_save = True
+                                    self.scan_caller.scan_folder_concurrent(ip,path)
+                                    # self.need_save = True
                         else:
                             logger.info(f"{LOG_TAG} {ip} has no shares!")
                             show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
@@ -761,7 +812,7 @@ class SearchWindow(QMainWindow):
                     if os.path.exists(path):
                         item.setText(1, "文件夹")
                         self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
-                        self.scan_caller.scan_folder_concurrent(path)
+                        self.scan_caller.scan_folder_concurrent(ip,path)
                         self.need_save = True
                     else:
                         logger.error(f'{LOG_TAG} 目录不存在: {path}')
@@ -855,29 +906,41 @@ class SearchWindow(QMainWindow):
                             if '层级较深，未扫描' == fname:
                                 folder_item.setText(1, "文件夹（未扫描）")
                                 folder_item.setBackground(0, Qt.yellow) # type: ignore
-    def save_folder_structure(self, path, structure):
-        # 提取路径层级（兼容 SMB 路径）
-        parts = path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
-        if not parts:
-            return
+    def save_folder_structure(self, ip, path, structure):
+        logger.info(f'{LOG_TAG} save_folder_structure ip:{ip} path:{path} structure len:{len(structure)}')
         
-        for i, part in enumerate(parts):
-            logger.info(f'{LOG_TAG} save_folder_structure part:{part}')
-            if part in self.share_map and 'shares' in self.share_map[part]:
-                try:
-                    if not isinstance(self.share_map[part]['shares'],dict):
-                        self.share_map[part]['shares'] = {}
-                    self.share_map[part]['shares'][path] = structure
-                    break
-                except Exception as e:
-                    logger.error(f'{LOG_TAG} save_folder_structure error: {e}')
-                    raise SystemError(f'{LOG_TAG} save_folder_structure error: {e}')
+        if ip not in self.share_map:
+            self.share_map[ip] = {}
+        if 'shares' not in self.share_map[ip]:
+            self.share_map[ip]['shares'] = {}
+        # self.share_map[ip][path] = structure
+        if not isinstance(self.share_map[ip]['shares'],dict):
+            self.share_map[ip]['shares'] = {}
+        self.share_map[ip]['shares'][path] = structure
+        self.need_save = True
+        
+        # # 提取路径层级（兼容 SMB 路径）
+        # parts = path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
+        # if not parts:
+        #     return
+        
+        # for i, part in enumerate(parts):
+        #     logger.info(f'{LOG_TAG} save_folder_structure part:{part}')
+        #     if part in self.share_map and 'shares' in self.share_map[part]:
+        #         try:
+        #             if not isinstance(self.share_map[part]['shares'],dict):
+        #                 self.share_map[part]['shares'] = {}
+        #             self.share_map[part]['shares'][path] = structure
+        #             break
+        #         except Exception as e:
+        #             logger.error(f'{LOG_TAG} save_folder_structure error: {e}')
+        #             raise SystemError(f'{LOG_TAG} save_folder_structure error: {e}')
     def process_folder_result(self):
         if hasattr(self.scan_caller, 'result_queue'):
             try:
-                path, structure = self.scan_caller.result_queue.get_nowait()
-                logger.info(f'{LOG_TAG} process_folder_result {path}')
-                self.save_folder_structure(path, structure)
+                ip, path, structure = self.scan_caller.result_queue.get_nowait()
+                logger.info(f'{LOG_TAG} process_folder_result ip:{ip} path:{path}')
+                self.save_folder_structure(ip, path, structure)
                 self.ui.statusbar.showMessage(f"{time.ctime()} 更新路径 {path}...")
                 self.add_structure_to_tree(path, structure)
             except Empty:
@@ -934,6 +997,8 @@ class SearchWindow(QMainWindow):
     def on_item_double_clicked(self, item, column):
         # Double-click to connect
         if item.parent():
+            if '未扫描' in item.text(0):
+                item = item.parent()
             self.connect_share(item)
             
 if __name__ == "__main__":
