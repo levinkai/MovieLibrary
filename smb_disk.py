@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-19 09:40:06
 LastEditors: LevinKai
-LastEditTime: 2025-05-20 15:38:41
+LastEditTime: 2025-05-20 16:00:14
 FilePath: \\MovieLibrary\\smb_disk.py
 '''
 import os
@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 import string
+import re
 
 sys_platform = platform.system().lower()
 print(f'{sys_platform}')
@@ -145,43 +146,80 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         return None
 
 def unmount_smb_share(path: str) -> bool:
+    r"""
+    卸载 SMB 挂载路径
+    - 支持 Windows/Linux/macOS
+    - Windows 可传入 Z: 或 \\host\share
     """
-    卸载挂载路径
-    成功返回 True，失败返回 False。
-    """
-    print(f"[unmount_smb_share] path:{path}")
+    sys_platform = platform.system().lower()
+    print(f"[unmount_smb_share] path: {path}")
 
-    if not Path(path).exists():
-        return True  # 认为已卸载
-
-    if sys_platform == "linux":
-        cmd = ["sudo", "umount", path]
-    elif sys_platform == "darwin":
-        cmd = ["umount", path]
-    elif sys_platform == "windows":
-        # net use Z: /delete
+    # 非 Windows 系统直接判断路径是否存在
+    if sys_platform in ("linux", "darwin"):
+        if not Path(path).exists():
+            return True
+        cmd = ["sudo", "umount", path] if sys_platform == "linux" else ["umount", path]
         try:
-            # path 可能是 Z:\ 或 Z:
-            drive = path[0].upper() + ":"
-            cmd = ["net", "use", drive, "/delete", "/y"]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
             return True
         except Exception as e:
-            print(f"[unmount_smb_share] Windows 卸载失败: {e}")
+            print(f"[unmount_smb_share] 卸载失败: {e}")
             return False
+
+    elif sys_platform == "windows":
+        path = path.strip()
+        # Case 1: 是一个合法盘符 Z: 或 Z:\ 开头
+        if re.fullmatch(r"[A-Z]:\\?", path.upper()):
+            drive = path[0].upper() + ":"
+            print(f"[unmount_smb_share] 识别为盘符: {drive}")
+            # 检查是否已映射该驱动器
+            try:
+                output = subprocess.check_output(["net", "use"], text=True)
+                if drive in output:
+                    cmd = ["net", "use", drive, "/delete", "/y"]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr.strip())
+                    print(f"[unmount_smb_share] 盘符 {drive} 卸载成功")
+                    return True
+                else:
+                    print(f"[unmount_smb_share] 盘符 {drive} 未映射，跳过卸载")
+                    return True
+            except Exception as e:
+                print(f"[unmount_smb_share] 查询或卸载失败: {e}")
+                return False
+
+        # Case 2: 是一个 SMB 路径 \\host\share
+        elif path.startswith("\\\\"):
+            print(f"[unmount_smb_share] 识别为 SMB 路径: {path}")
+            try:
+                # 查询所有 net use 映射
+                output = subprocess.check_output(["net", "use"], text=True)
+                # 示例行：Z:          \\192.168.1.141\pi     Microsoft Windows Network
+                for line in output.splitlines():
+                    match = re.match(r"^([A-Z]:)\s+(\\\\[^\s]+)", line.strip())
+                    if match:
+                        drive, target = match.groups()
+                        if target.lower() == path.lower():
+                            print(f"[unmount_smb_share] 匹配映射盘符 {drive} → {target}，开始卸载")
+                            cmd = ["net", "use", drive, "/delete", "/y"]
+                            result = subprocess.run(cmd, capture_output=True, text=True)
+                            if result.returncode == 0:
+                                print(f"[unmount_smb_share] 卸载成功: {drive}")
+                            else:
+                                print(f"[unmount_smb_share] 卸载失败: {drive} - {result.stderr.strip()}")
+                return True
+            except Exception as e:
+                print(f"[unmount_smb_share] SMB 路径卸载失败: {e}")
+                return False
+        else:
+            print(f"[unmount_smb_share] 无法识别路径类型：{path}")
+            return False
+
     else:
         raise NotImplementedError(f"Unsupported platform: {sys_platform}")
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
-        return True
-    except Exception as e:
-        print(f"[unmount_smb_share] 卸载失败: {e}")
-        return False
     
 if __name__ == "__main__":
     path = mount_smb_share("192.168.1.141", "pi")
