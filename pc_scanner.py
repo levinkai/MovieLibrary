@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-20 14:22:30
+LastEditTime: 2025-05-20 16:00:27
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -762,7 +762,7 @@ class SearchWindow(QMainWindow):
             if conn.connect(ip, 445):
                 logger.info(f"{LOG_TAG} Connected to {ip} via port 445")
                 show_auto_close_message(title="成功", text=f"连接到 {ip} 成功", window=self)
-                item.setBackground(0, Qt.green)
+                item.setBackground(0, Qt.green) # type: ignore
                 
                 if username == '' or password == '':
                     logger.info(f'{LOG_TAG} {ip} not need login')

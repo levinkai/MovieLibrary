@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-19 09:40:06
 LastEditors: LevinKai
-LastEditTime: 2025-05-20 16:00:14
+LastEditTime: 2025-05-20 16:27:24
 FilePath: \\MovieLibrary\\smb_disk.py
 '''
 import os
@@ -84,7 +84,10 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         wmic = subprocess.check_output(cmd,text=True, shell=True,timeout=5)
         print(f'{cmd}:\n{wmic}')
         for line in wmic.splitlines()[1:]:
-            parts = line.strip().split()
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
             if len(parts) == 2:
                 drive, provider = parts
                 existing[drive.upper()] = provider
@@ -104,7 +107,10 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         all_disks = subprocess.check_output(cmd,text=True, shell=True,timeout=5)
         print(f'{cmd}:\n{all_disks}')
         for line in all_disks.splitlines()[1:]:
-            parts = line.strip().split()
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
             if len(parts) == 2:
                 dtype, drive = parts
                 # DriveType: 3 = 本地固定磁盘, 4 = 网络连接, 2 = 可移动
@@ -169,6 +175,15 @@ def unmount_smb_share(path: str) -> bool:
             return False
 
     elif sys_platform == "windows":
+        def is_permanent_mapping(drive_letter: str) -> bool:
+            try:
+                key = rf"HKCU\Network\{drive_letter.upper()}"
+                result = subprocess.run(["reg", "query", key], capture_output=True, text=True)
+                return result.returncode == 0
+            except Exception as e:
+                print(f"[is_permanent_mapping] 判断失败: {e}")
+                return False
+
         path = path.strip()
         # Case 1: 是一个合法盘符 Z: 或 Z:\ 开头
         if re.fullmatch(r"[A-Z]:\\?", path.upper()):
@@ -199,17 +214,21 @@ def unmount_smb_share(path: str) -> bool:
                 output = subprocess.check_output(["net", "use"], text=True)
                 # 示例行：Z:          \\192.168.1.141\pi     Microsoft Windows Network
                 for line in output.splitlines():
-                    match = re.match(r"^([A-Z]:)\s+(\\\\[^\s]+)", line.strip())
-                    if match:
-                        drive, target = match.groups()
-                        if target.lower() == path.lower():
-                            print(f"[unmount_smb_share] 匹配映射盘符 {drive} → {target}，开始卸载")
-                            cmd = ["net", "use", drive, "/delete", "/y"]
-                            result = subprocess.run(cmd, capture_output=True, text=True)
-                            if result.returncode == 0:
-                                print(f"[unmount_smb_share] 卸载成功: {drive}")
-                            else:
-                                print(f"[unmount_smb_share] 卸载失败: {drive} - {result.stderr.strip()}")
+                    line = line.strip()
+                    if not line or not "\\" in line:
+                        continue
+                    
+                    # 尝试从字段中提取本地盘符和远程路径
+                    parts = re.split(r"\s{2,}", line)
+                    print(f"[unmount_smb_share] line: {line} parts: {parts}")
+                    if len(parts) >= 3:
+                        status, local, remote = parts[:3]
+                        permanent = is_permanent_mapping(local)
+                        print(f"[unmount_smb_share] status: {status} local: {local} remote: {remote} permanent:{permanent}")
+                        if (remote.lower() == path.lower()) and (not permanent):
+                            print(f"[unmount_smb_share] 匹配: {local} -> {remote}，卸载中...")
+                            subprocess.run(["net", "use", local, "/delete", "/y"],
+                                        capture_output=True, text=True)
                 return True
             except Exception as e:
                 print(f"[unmount_smb_share] SMB 路径卸载失败: {e}")
@@ -226,6 +245,7 @@ if __name__ == "__main__":
     if path and os.path.exists(path):
         print(f"挂载成功: {path}")
         # do something...
+        unmount_smb_share(r'\\192.168.1.141\pi')
         unmount_smb_share(path)
     else:
         print("挂载失败")
