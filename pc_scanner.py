@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-19 16:32:55
+LastEditTime: 2025-05-20 14:22:30
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -540,13 +540,13 @@ class SearchWindow(QMainWindow):
         
     def scan_shares(self):
         self.need_save = True
+        self.ui.treeWidget_sharelist.clear()  # Clear existing tree items
         self.scan_caller.emitter.resultReady.connect(self.on_scan_complete)
         self.scan_caller.scan()
         self.ui.statusbar.showMessage(f'{time.ctime()} 扫描开始...')
         
     def on_scan_complete(self, result):
         print("on_scan_complete [Scan Result]:", len(result) if result else result)
-        self.ui.treeWidget_sharelist.clear()  # Clear existing tree items
         
         try:
             if isinstance(result,dict):
@@ -579,7 +579,7 @@ class SearchWindow(QMainWindow):
                     if isinstance(shares, dict):
                         for share_name, tree_structure in shares.items():
                             share_path = f"{ip}\\{share_name}" if ip not in share_name else share_name
-                            self.share_task_queue.put((share_path, tree_structure))
+                            self.share_task_queue.put((ip, share_path, tree_structure))
                     elif isinstance(shares, list):
                         for share in shares:
                             share_item = QTreeWidgetItem(ip_item) # type: ignore
@@ -732,7 +732,7 @@ class SearchWindow(QMainWindow):
                 self.connect_share(item)
             elif action == delete_action:
                 self.delete_item(item)
-    
+                self.need_save = True
     def connect_share(self, item):
         """
         Establish an SMB connection and refresh the tree structure for the share.
@@ -778,16 +778,11 @@ class SearchWindow(QMainWindow):
                             item = QTreeWidgetItem(topitem)
                             item.setText(0, share)
                             if 'win32' == platform:
-                                smb_path = f"\\\\{ip}\\{share}"
-                                path = mount_smb_share(ip,share,username,password)#rf"\\{ip}\{share}"
+                                # smb_path = f"\\\\{ip}\\{share}"
+                                path = mount_smb_share(ip,share,username,password)
                                 if path and os.path.exists(path):
-                                    # if smb_path not in self.share_map[ip]:
-                                    #     self.share_map[ip][smb_path] = {}
-                                    # if path not in self.share_map[ip][smb_path]:
-                                    #     self.share_map[ip][smb_path][path] = {}
                                     self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
                                     self.scan_caller.scan_folder_concurrent(ip,path)
-                                    # self.need_save = True
                             else:
                                 #1 linux macos 挂载到本地，名称为share
                                 #2 生成路径
@@ -800,17 +795,20 @@ class SearchWindow(QMainWindow):
                                 if os.path.exists(path):
                                     self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
                                     self.scan_caller.scan_folder_concurrent(ip,path)
-                                    # self.need_save = True
                         else:
                             logger.info(f"{LOG_TAG} {ip} has no shares!")
                             show_auto_close_message(title="提示", text=f"{ip} has no shares!", window=self)
                 else:
                     path = self.get_item_path(item)
-                    if not path.startswith('\\\\'):
-                        path = rf"\\{path}"
                     logger.info(f'{LOG_TAG} research directory ip:{ip} share:{share} path:{path}')
                     if os.path.exists(path):
                         item.setText(1, "文件夹")
+                        item.setBackground(0, Qt.NoBrush)    # type: ignore
+                        parent_path = self.get_item_path(item.parent())
+                        if parent_path:
+                            if ip not in parent_path:
+                                parent_path = f'{ip}\\{parent_path}'
+                            self.share_map[ip]['shares'][parent_path][item.text(0)] = {}
                         self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
                         self.scan_caller.scan_folder_concurrent(ip,path)
                         self.need_save = True
@@ -827,22 +825,14 @@ class SearchWindow(QMainWindow):
             logger.error(f"{LOG_TAG} Failed to connect to {ip}: {e}")
             show_auto_close_message(title="错误", text=f"连接失败: {e}", window=self, icon=QMessageBox.Critical) # type: ignore
             item.setBackground(0, Qt.red) # type: ignore
-            
-    def on_folder_scanned(self, result):
-        if 'folder' in result:
-            path, structure = result['folder']
-            logger.info(f'{LOG_TAG} folder scanned: {path}')
-            
-            self.share_map[path] = structure
-            self.add_structure_to_tree(path, structure)
     
-    def add_structure_to_tree(self, base_path, structure, parent_item=None):
+    def add_structure_to_tree(self, ip, base_path, structure, parent_item=None):
         top_level_parent =  parent_item if parent_item is not None else self.get_top_level_parent(self.ui.treeWidget_sharelist.currentItem())
         
         """
         根据 base_path 从顶层依次查找或创建节点，并将 structure 添加进去。
         """
-        logger.info(f'{LOG_TAG} add_structure_to_tree base_path:{base_path} structure len:{len(structure)}|{top_level_parent.text((0))}')
+        logger.info(f'{LOG_TAG} add_structure_to_tree ip:{ip} base_path:{base_path} structure len:{len(structure)}|{top_level_parent.text((0))}')
         
         # 提取路径层级（兼容 SMB 路径）
         parts = base_path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
@@ -919,30 +909,16 @@ class SearchWindow(QMainWindow):
         self.share_map[ip]['shares'][path] = structure
         self.need_save = True
         
-        # # 提取路径层级（兼容 SMB 路径）
-        # parts = path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
-        # if not parts:
-        #     return
-        
-        # for i, part in enumerate(parts):
-        #     logger.info(f'{LOG_TAG} save_folder_structure part:{part}')
-        #     if part in self.share_map and 'shares' in self.share_map[part]:
-        #         try:
-        #             if not isinstance(self.share_map[part]['shares'],dict):
-        #                 self.share_map[part]['shares'] = {}
-        #             self.share_map[part]['shares'][path] = structure
-        #             break
-        #         except Exception as e:
-        #             logger.error(f'{LOG_TAG} save_folder_structure error: {e}')
-        #             raise SystemError(f'{LOG_TAG} save_folder_structure error: {e}')
     def process_folder_result(self):
         if hasattr(self.scan_caller, 'result_queue'):
             try:
                 ip, path, structure = self.scan_caller.result_queue.get_nowait()
+                if ip not in path:
+                    path = f'{ip}\\{path}'
                 logger.info(f'{LOG_TAG} process_folder_result ip:{ip} path:{path}')
                 self.save_folder_structure(ip, path, structure)
                 self.ui.statusbar.showMessage(f"{time.ctime()} 更新路径 {path}...")
-                self.add_structure_to_tree(path, structure)
+                self.add_structure_to_tree(ip, path, structure)
             except Empty:
                 self.result_timer.start(1000)
                 
@@ -950,15 +926,15 @@ class SearchWindow(QMainWindow):
         processed = 0
         while not self.share_task_queue.empty() and processed < 5:  # 一次处理最多5个
             try:
-                path, structure = self.share_task_queue.get_nowait()
-                self.ui.statusbar.showMessage(f"{time.ctime()} 初始化路径 {path}...")
-                ip = path.strip('\\').split('\\')[0]
+                ip, path, structure = self.share_task_queue.get_nowait()
+                self.ui.statusbar.showMessage(f"{time.ctime()} 初始化路径 ip:{ip} path:{path}...")
+                # ip = path.strip('\\').split('\\')[0]
                 parent_ip = self.get_ip_item(ip)
                 logger.info(f'{LOG_TAG} process_share_task {path} {parent_ip.text(0)}') # type: ignore
                 if parent_ip is None:
                     logger.error(f'{LOG_TAG} process_share_task error: {path} not found in tree')
                     continue
-                self.add_structure_to_tree(base_path=path, structure=structure,parent_item=parent_ip)
+                self.add_structure_to_tree(ip, base_path=path, structure=structure,parent_item=parent_ip)
                 processed += 1
             except Exception as e:
                 logger.error(f"{LOG_TAG} process_share_task error: {e}")
