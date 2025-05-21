@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-20 16:00:27
+LastEditTime: 2025-05-21 11:02:55
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -331,7 +331,7 @@ class ScanCaller(QRunnable):
             
             return ''
         
-    def scan_folder_concurrent(self, ip: str, root_path: str, max_depth: int = 3):
+    def scan_folder_concurrent(self, ip: str, root_path: str, max_depth: int = 2):
         """
         并发扫描整个目录结构，每扫描一个目录立即发射 folderScanned(ip, path, structure)
         """
@@ -655,7 +655,7 @@ class SearchWindow(QMainWindow):
             return f"{drive_letter}\\{sub_path}" if sub_path else f"{drive_letter}\\"
 
         # 否则为 SMB 路径
-        return r"\\\\" + r"\\".join(parts)
+        return "\\\\" + "\\".join(parts)
     
     def _add_ip_node(self, ip, data):
         root = self.ui.treeWidget_sharelist
@@ -778,9 +778,9 @@ class SearchWindow(QMainWindow):
                             item = QTreeWidgetItem(topitem)
                             item.setText(0, share)
                             if 'win32' == platform:
-                                # smb_path = f"\\\\{ip}\\{share}"
-                                path = mount_smb_share(ip,share,username,password)
-                                if path and os.path.exists(path):
+                                smb_path = f"\\\\{ip}\\{share}"
+                                path = smb_path#mount_smb_share(ip,share,username,password)
+                                if path and (path.startswith("\\\\") or os.path.exists(path)):
                                     self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
                                     self.scan_caller.scan_folder_concurrent(ip,path)
                             else:
@@ -801,10 +801,10 @@ class SearchWindow(QMainWindow):
                 else:
                     path = self.get_item_path(item)
                     logger.info(f'{LOG_TAG} research directory ip:{ip} share:{share} path:{path}')
-                    if os.path.exists(path):
+                    if path and (path.startswith("\\\\") or os.path.exists(path)):
                         item.setText(1, "文件夹")
-                        item.setBackground(0, Qt.NoBrush)    # type: ignore
-                        parent_path = self.get_item_path(item.parent())
+                        item.setBackground(0, Qt.NoBrush) # type: ignore
+                        parent_path: str = self.get_item_path(item.parent())
                         if parent_path:
                             if ip not in parent_path:
                                 parent_path = f'{ip}\\{parent_path}'
@@ -814,6 +814,8 @@ class SearchWindow(QMainWindow):
                         self.need_save = True
                     else:
                         logger.error(f'{LOG_TAG} 目录不存在: {path}')
+                        item.setBackground(0, Qt.red) # type: ignore
+                        
                         show_auto_close_message(title="错误", text=f"目录不存在: {path}", window=self, icon=QMessageBox.Critical) # type: ignore
             elif conn.connect(ip, 139):
                 logger.info(f"{LOG_TAG} Connected to {ip} via port 139")
