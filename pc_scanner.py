@@ -1,13 +1,13 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-22 10:03:11
+LastEditTime: 2025-05-22 10:47:31
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
 import os
 
-platform = sys.platform
+platform = sys.platform.lower()
 print(platform)
 import os
 # 获取当前文件所在目录的上一级路径
@@ -655,27 +655,16 @@ class SearchWindow(QMainWindow):
     
     def get_item_path(self, item) -> str:
         '''
-        1. smb path :
-            item:
-            192.168.1.141
-                pi
-                    test
-                        test1
-                            test2
-                                test3
-            path:
-            '\\\\192.168.1.141\\pi\\test\\test1\\test2\\test3'
-            
-            2. mount path:
-                item:
-                192.168.1.141
-                    I:
-                        test
-                            test1
-                                test2
-                                    test3
-                path:
-                'I:\\test\\test1\\test2\\test3'
+        根据树结构节点 item 构造 SMB 路径或挂载路径。
+        
+        返回：
+            Windows:
+                SMB:     '\\\\192.168.1.141\\pi\\test\\test1'
+                挂载盘: 'I:\\test\\test1'
+            Linux:
+                '/mnt/192.168.1.141/test/test1'
+            macOS:
+                '/Volumes/192.168.1.141/test/test1'
         '''
         parts = []
         current = item
@@ -684,25 +673,31 @@ class SearchWindow(QMainWindow):
             current = current.parent()
         
         if len(parts) < 2:
-            return "\\".join(parts)
-        
+            return "\\".join(parts) if platform == 'win32' else "/".join(parts)
+
         ip = parts[0]
         second = parts[1]
         logger.info(f"{LOG_TAG} get_item_path ip:{ip} second:{second}")
-        
+
         ip_pattern = r"^\d{1,3}(\.\d{1,3}){3}$"
         if not re.match(ip_pattern, ip):
             logger.error(f"{LOG_TAG} Invalid IP address: {ip}")
             return ""
-        
-        # 判断是否为 Windows 挂载盘符路径
-        if re.fullmatch(r"[A-Z]:", second):
-            drive_letter = second
-            sub_path = "\\".join(parts[2:]) if len(parts) > 2 else ""
-            return f"{drive_letter}\\{sub_path}" if sub_path else f"{drive_letter}\\"
 
-        # 否则为 SMB 路径
-        return "\\\\" + "\\".join(parts)
+        # --- Windows: SMB or 挂载盘 ---
+        if platform == 'win32':
+            if re.fullmatch(r"[A-Z]:", second):
+                # 是挂载盘符路径
+                sub_path = "\\".join(parts[2:]) if len(parts) > 2 else ""
+                return f"{second}\\{sub_path}" if sub_path else f"{second}\\"
+            else:
+                # 是 SMB 网络路径
+                return "\\\\" + "\\".join(parts[1:])
+
+        # --- macOS 或 Linux: mount 路径 ---
+        mount_base = "/Volumes" if platform == "darwin" else "/mnt"
+        mount_path = os.path.join(mount_base, *parts[2:]) if len(parts) > 2 else os.path.join(mount_base)
+        return mount_path
     
     def _add_ip_node(self, ip, data):
         root = self.ui.treeWidget_sharelist
@@ -892,7 +887,7 @@ class SearchWindow(QMainWindow):
         
         # 依次定位或创建节点
         root = self.ui.treeWidget_sharelist
-        current_item = None
+        current_item = parent_item#None
         
         for i, part in enumerate(parts):
             found = False
@@ -969,7 +964,8 @@ class SearchWindow(QMainWindow):
                 logger.info(f'{LOG_TAG} process_folder_result ip:{ip} path:{path}')
                 self.save_folder_structure(ip, path, structure)
                 self.ui.statusbar.showMessage(f"{time.ctime()} 更新路径 {path}...")
-                self.add_structure_to_tree(ip, path, structure)
+                parent_ip = self.get_ip_item(ip)
+                self.add_structure_to_tree(ip, path, structure,parent_ip)
             except Empty:
                 self.result_timer.start(1000)
                 

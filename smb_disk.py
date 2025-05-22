@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-19 09:40:06
 LastEditors: LevinKai
-LastEditTime: 2025-05-20 16:27:24
+LastEditTime: 2025-05-22 10:47:37
 FilePath: \\MovieLibrary\\smb_disk.py
 '''
 import os
@@ -37,11 +37,20 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
                         return str(mount_path)
 
         # 确保本地挂载点存在
-        mount_path.mkdir(parents=True, exist_ok=True)
-
-        cred_option = f",username={username}"
-        if password:
-            cred_option += f",password={password}"
+        cmd = f'sudo mkdir -p {mount_path}'
+        try:
+            result = subprocess.run(args=cmd, capture_output=True, text=True, check=True, shell=True)
+            print(f'result:{result.stdout.strip()}')
+        except Exception as e:
+            print(f"[mount_smb_share] 创建挂载目录失败: {e}")
+            return None
+        
+        # 构造挂载选项
+        cred_option = ""
+        if username and username.strip():
+            cred_option += f",username={username}"
+            if password:
+                cred_option += f",password={password}"
         else:
             cred_option += ",guest"
 
@@ -52,9 +61,11 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         ]
 
     elif sys_platform == "darwin":
-        mount_name = f"{ip.replace('.', '_')}_{share}"
-        mount_path = Path("/Volumes") / mount_name
-
+        # mount_name = f"{ip.replace('.', '_')}_{share}"
+        # mount_path = Path("/Volumes") / mount_name
+        mount_base = Path("/Volumes") / ip
+        mount_path = mount_base / share
+        
         if mount_path.exists():
             print(f"[mount_smb_share] 已挂载: {mount_path}")
             return str(mount_path)
@@ -63,11 +74,10 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         if password:
             smb_url = f"//{username}:{password}@{ip}/{share}"
 
-        mount_path.mkdir(parents=True, exist_ok=True)
-        # cmd = [
-        #     "mkdir", "-p", str(mount_path)
-        # ]
-        # subprocess.run(cmd, check=True)
+        cmd = [
+            "mkdir", "-p", str(mount_path)
+        ]
+        subprocess.run(cmd, check=True)
         
         cmd = [
             "mount_smbfs",
