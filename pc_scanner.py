@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-21 11:02:55
+LastEditTime: 2025-05-22 10:03:11
 FilePath: \\MovieLibrary\\pc_scanner.py
 '''
 import sys
@@ -24,6 +24,50 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ipaddress import ip_network
 import re
 
+if 'linux' == platform:
+    import debugpy # type: ignore
+    import threading
+    
+    def debug_wait(timeout: int = 10, host: str = "0.0.0.0", port: int = 5678):
+        """
+        启动 debugpy 并等待调试客户端连接，带超时功能。
+        - timeout: 等待调试器连接的秒数，0 或负值表示无限等待。
+        - host/port: debugpy 监听地址，默认为 0.0.0.0:5678
+        """
+        try:
+            # 若已监听则不会重复监听
+            debugpy.listen((host, port))
+            print(f"[debugpy] Listening on {host}:{port}...")
+
+            if timeout <= 0:
+                print("[debugpy] Waiting for client (no timeout)...")
+                debugpy.wait_for_client()
+                print("[debugpy] Debugger attached.")
+                return
+
+            # 启动等待线程
+            connected = threading.Event()
+
+            def _wait():
+                try:
+                    debugpy.wait_for_client()
+                    connected.set()
+                except Exception as e:
+                    print(f"[debugpy] wait_for_client error: {e}")
+
+            thread = threading.Thread(target=_wait, daemon=True)
+            thread.start()
+
+            if connected.wait(timeout):
+                print("[debugpy] Debugger attached.")
+            else:
+                print(f"[debugpy] Timeout after {timeout}s: no debugger attached.")
+        except (OSError, socket.error) as e:
+            print(f"[debugpy] Failed to listen on {host}:{port}: {e}")
+
+    print('debugpy start')
+    debug_wait(timeout=10)
+    
 from functools import partial
 from PySide6.QtWidgets import * # type: ignore
 from PySide6.QtGui import * # type: ignore
@@ -378,13 +422,16 @@ class ScanCaller(QRunnable):
         for _ in range(8):
             self._executor.submit(scan_worker)
         
-DEFAULT_FILE_NAME = "result.json"
+DEFAULT_FILE_NAME = "result.json.gz"
+# 获取当前脚本文件所在目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_FILE_PATH = os.path.join(SCRIPT_DIR, DEFAULT_FILE_NAME)
 
-def save_results_compressed(data, file_path=f'{DEFAULT_FILE_NAME}.gz'):
+def save_results_compressed(data, file_path=DEFAULT_FILE_PATH):
     with gzip.open(file_path, 'wt', encoding='utf-8') as f:
         json.dump(data, f, indent=None, separators=(',', ':'))  # 紧凑格式
 
-def load_results_compressed(file_path=f'{DEFAULT_FILE_NAME}.gz'):
+def load_results_compressed(file_path=DEFAULT_FILE_PATH):
     if not os.path.exists(file_path):
         return {}
     try:
@@ -394,7 +441,7 @@ def load_results_compressed(file_path=f'{DEFAULT_FILE_NAME}.gz'):
         logger.error(f"{LOG_TAG} load_results_compressed failed: {e}")
         return {}
     
-def load_results(file_path=DEFAULT_FILE_NAME):
+def load_results(file_path=DEFAULT_FILE_PATH):
     """
     加载测试结果文件，如果不存在则创建一个空的测试结果文件。
     :param file_path: 测试结果文件路径
@@ -419,7 +466,7 @@ def load_results(file_path=DEFAULT_FILE_NAME):
                 json.dump([], file, indent=4)
             return {}
         
-def save_results(test_results, file_path=DEFAULT_FILE_NAME):
+def save_results(test_results, file_path=DEFAULT_FILE_PATH):
     """
     保存测试结果到文件中。
     :param test_results: 测试结果列表
@@ -792,7 +839,8 @@ class SearchWindow(QMainWindow):
                                 except Exception as e:
                                     logger.error(f'{LOG_TAG} mount share fail! {e}')
                                     show_auto_close_message(title="错误", text=f"挂载失败: {e}", window=self, icon=QMessageBox.Critical)
-                                if os.path.exists(path):
+                                    continue
+                                if path and os.path.exists(path):
                                     self.ui.statusbar.showMessage(f'{time.ctime()} 扫描目录 {path}...')
                                     self.scan_caller.scan_folder_concurrent(ip,path)
                         else:
@@ -837,7 +885,8 @@ class SearchWindow(QMainWindow):
         logger.info(f'{LOG_TAG} add_structure_to_tree ip:{ip} base_path:{base_path} structure len:{len(structure)}|{top_level_parent.text((0))}')
         
         # 提取路径层级（兼容 SMB 路径）
-        parts = base_path.strip('\\').split('\\')  # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
+        # 例如 ['192.168.1.141', 'pi', 'Camera', 'nps', 'conf']
+        parts = base_path.strip('/\\').split(os.sep if os.sep in base_path else ('\\' if '\\' in base_path else '/'))
         if not parts:
             return
         
