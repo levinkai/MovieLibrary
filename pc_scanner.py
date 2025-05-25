@@ -1,8 +1,8 @@
 '''
 Date: 2025-05-06 09:21:40
 LastEditors: LevinKai
-LastEditTime: 2025-05-22 10:47:31
-FilePath: \\MovieLibrary\\pc_scanner.py
+LastEditTime: 2025-05-25 15:03:01
+FilePath: \\Work\\MovieLibrary\\pc_scanner.py
 '''
 import sys
 import os
@@ -298,6 +298,7 @@ class ScanCaller(QRunnable):
         return None
     
     def _scan_single_ip(self, ip):
+        print(f'{time.ctime()} _scan_single_ip ip:{ip}')
         """扫描单个 IP 地址，检查是否开放 SMB 以及共享信息"""
         try:
             if is_smb_open(ip):
@@ -695,7 +696,7 @@ class SearchWindow(QMainWindow):
                 return "\\\\" + "\\".join(parts[1:])
 
         # --- macOS 或 Linux: mount 路径 ---
-        mount_base = "/Volumes" if platform == "darwin" else "/mnt"
+        mount_base = "/" if platform == "darwin" else "/mnt"
         mount_path = os.path.join(mount_base, *parts[2:]) if len(parts) > 2 else os.path.join(mount_base)
         return mount_path
     

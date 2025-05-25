@@ -1,8 +1,8 @@
 '''
 Date: 2025-05-19 09:40:06
 LastEditors: LevinKai
-LastEditTime: 2025-05-22 10:47:37
-FilePath: \\MovieLibrary\\smb_disk.py
+LastEditTime: 2025-05-25 14:43:19
+FilePath: \\Work\\MovieLibrary\\smb_disk.py
 '''
 import os
 import platform
@@ -61,29 +61,47 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         ]
 
     elif sys_platform == "darwin":
-        # mount_name = f"{ip.replace('.', '_')}_{share}"
-        # mount_path = Path("/Volumes") / mount_name
-        mount_base = Path("/Volumes") / ip
-        mount_path = mount_base / share
-        
-        if mount_path.exists():
-            print(f"[mount_smb_share] 已挂载: {mount_path}")
-            return str(mount_path)
+        # 检查是否已挂载
+        mount_base = Path("/Volumes") / share
+        if mount_base.exists():
+            print(f"[mount_smb_share] 已挂载: {mount_base}")
+            return str(mount_base)
 
-        smb_url = f"//{username}@{ip}/{share}"
+        smb_url = f"smb://{username}@{ip}/{share}"
         if password:
-            smb_url = f"//{username}:{password}@{ip}/{share}"
+            smb_url = f"smb://{username}:{password}@{ip}/{share}"
 
-        cmd = [
-            "mkdir", "-p", str(mount_path)
-        ]
-        subprocess.run(cmd, check=True)
-        
-        cmd = [
-            "mount_smbfs",
-            smb_url,
-            str(mount_path)
-        ]
+        try:
+            # 使用 AppleScript 指令让 Finder 挂载 smb 路径
+            script = f'''
+            tell application "Finder"
+                try
+                    mount volume "{smb_url}"
+                on error errMsg
+                    return "Error: " & errMsg
+                end try
+            end tell
+            '''
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+            output = result.stdout.strip()
+            if "Error" in output:
+                raise RuntimeError(output)
+            
+            # 等待一会儿让系统完成挂载
+            import time
+            for _ in range(10):
+                if mount_base.exists():
+                    break
+                time.sleep(0.5)
+            
+            if mount_base.exists():
+                return str(mount_base)
+            else:
+                raise RuntimeError("挂载后找不到路径")
+        except Exception as e:
+            print(f"[mount_smb_share] macOS 挂载失败: {e}")
+            return None
+
     elif sys_platform == "windows":
         #net use Z: \\192.168.1.141\pi /user:guest /persistent:no
         # —— 2. 先扫描已有网络驱动器 —— 
@@ -171,7 +189,7 @@ def unmount_smb_share(path: str) -> bool:
     print(f"[unmount_smb_share] path: {path}")
 
     # 非 Windows 系统直接判断路径是否存在
-    if sys_platform in ("linux", "darwin"):
+    if sys_platform == "linux":
         if not Path(path).exists():
             return True
         cmd = ["sudo", "umount", path] if sys_platform == "linux" else ["umount", path]
@@ -182,6 +200,28 @@ def unmount_smb_share(path: str) -> bool:
             return True
         except Exception as e:
             print(f"[unmount_smb_share] 卸载失败: {e}")
+            return False
+    elif sys_platform == "darwin":
+        if not Path(path).exists():
+            return True
+        try:
+            # 使用 AppleScript 让 Finder 卸载卷
+            script = f'''
+            tell application "Finder"
+                try
+                    eject POSIX file "{path}"
+                on error errMsg
+                    return "Error: " & errMsg
+                end try
+            end tell
+            '''
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+            output = result.stdout.strip()
+            if "Error" in output:
+                raise RuntimeError(output)
+            return True
+        except Exception as e:
+            print(f"[unmount_smb_share] macOS 卸载失败: {e}")
             return False
 
     elif sys_platform == "windows":
