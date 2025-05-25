@@ -1,7 +1,7 @@
 '''
 Date: 2025-05-19 09:40:06
 LastEditors: LevinKai
-LastEditTime: 2025-05-25 14:43:19
+LastEditTime: 2025-05-25 16:33:47
 FilePath: \\Work\\MovieLibrary\\smb_disk.py
 '''
 import os
@@ -26,15 +26,15 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         mount_base = Path("/mnt") / ip
         mount_path = mount_base / share
 
-        # —— 1. 如果路径已存在且已挂载，直接返回 ——
+        # —— 1. 如果路径已存在且已挂载（且挂载源为目标ip/共享），直接返回 ——
         if mount_path.exists():
-            # 检查是否已挂载
             with open("/proc/mounts") as f:
                 for line in f:
                     cols = line.split()
                     if cols[1] == str(mount_path) and cols[0].startswith(f"//{ip}/{share}"):
                         print(f"[mount_smb_share] 已挂载: {mount_path}")
                         return str(mount_path)
+            # 路径存在但未挂载或挂错源，继续往下走
 
         # 确保本地挂载点存在
         cmd = f'sudo mkdir -p {mount_path}'
@@ -61,18 +61,29 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         ]
 
     elif sys_platform == "darwin":
-        # 检查是否已挂载
-        mount_base = Path("/Volumes") / share
-        if mount_base.exists():
-            print(f"[mount_smb_share] 已挂载: {mount_base}")
-            return str(mount_base)
+        # 检查/Volumes下是否有同名share且指向指定ip
+        base_mount_dir = Path("/Volumes")
+        candidate_mounts = []
+        for p in base_mount_dir.iterdir():
+            if p.name.startswith(share):
+                # 检查该挂载点是否指向目标ip
+                try:
+                    # 查询mount信息
+                    mount_info = subprocess.check_output(['mount'], text=True)
+                    for line in mount_info.splitlines():
+                        if str(p) in line and f"//{username}@" in line and ip in line and f"/{share}" in line:
+                            print(f"[mount_smb_share] 已挂载且指向目标ip: {p}")
+                            return str(p)
+                except Exception as e:
+                    print(f"[mount_smb_share] 查询挂载信息失败: {e}")
+                candidate_mounts.append(p)  # 若不是目标ip，后续新挂载
 
         smb_url = f"smb://{username}@{ip}/{share}"
         if password:
             smb_url = f"smb://{username}:{password}@{ip}/{share}"
 
         try:
-            # 使用 AppleScript 指令让 Finder 挂载 smb 路径
+            # 使用 AppleScript 让 Finder 执行挂载
             script = f'''
             tell application "Finder"
                 try
@@ -90,64 +101,64 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
             # 等待一会儿让系统完成挂载
             import time
             for _ in range(10):
-                if mount_base.exists():
-                    break
+                for p in base_mount_dir.iterdir():
+                    if p.name.startswith(share):
+                        try:
+                            mount_info = subprocess.check_output(['mount'], text=True)
+                            for line in mount_info.splitlines():
+                                if str(p) in line and f"//{username}@" in line and ip in line and f"/{share}" in line:
+                                    return str(p)
+                        except Exception:
+                            continue
                 time.sleep(0.5)
-            
-            if mount_base.exists():
-                return str(mount_base)
-            else:
-                raise RuntimeError("挂载后找不到路径")
+            raise RuntimeError("挂载后找不到路径")
         except Exception as e:
             print(f"[mount_smb_share] macOS 挂载失败: {e}")
             return None
 
     elif sys_platform == "windows":
-        #net use Z: \\192.168.1.141\pi /user:guest /persistent:no
-        # —— 2. 先扫描已有网络驱动器 —— 
-        # 并且检查是否已有网络映射到相同 smb_path
         smb_path = f"\\\\{ip}\\{share}"
         existing = {}
-        cmd = 'wmic logicaldisk where drivetype=4 get name,providername'
-        wmic = subprocess.check_output(cmd,text=True, shell=True,timeout=5)
-        print(f'{cmd}:\n{wmic}')
-        for line in wmic.splitlines()[1:]:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) == 2:
-                drive, provider = parts
-                existing[drive.upper()] = provider
+        # 查找所有已映射的网络驱动器，且指向目标ip/共享
+        try:
+            cmd = 'wmic logicaldisk where drivetype=4 get name,providername'
+            wmic = subprocess.check_output(cmd, text=True, shell=True, timeout=5)
+            print(f'{cmd}:\n{wmic}')
+            for line in wmic.splitlines()[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) == 2:
+                    drive, provider = parts
+                    existing[drive.upper()] = provider
 
-        print(f"existing: {existing}")
-        if existing:
+            print(f"existing: {existing}")
             for drive, provider in existing.items():
                 if provider.lower() == smb_path.lower():
                     print(f"[mount_smb_share] 发现已映射盘符 {drive} -> {provider}")
                     return drive + "\\"
-        else:
-            print("[mount_smb_share] 没有已映射的网络驱动器")
-            
+        except Exception as e:
+            print(f"[mount_smb_share] 查询网络驱动器失败: {e}")
+
         # 获取所有已用盘符（固定盘 & 网络盘都跳过）
         used = set()
-        cmd = 'wmic logicaldisk get Name,DriveType'
-        all_disks = subprocess.check_output(cmd,text=True, shell=True,timeout=5)
-        print(f'{cmd}:\n{all_disks}')
-        for line in all_disks.splitlines()[1:]:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) == 2:
-                dtype, drive = parts
-                # DriveType: 3 = 本地固定磁盘, 4 = 网络连接, 2 = 可移动
-                print(f"drive: {drive} DriveType: {dtype}")
-                print(f'{'本地磁盘' if dtype == '3' else '网络盘' if dtype == '4' else '可移动磁盘'}: {drive}')
-                used.add(drive[0].upper())
-                
-        print(f'used:{used}')
-        
+        try:
+            cmd = 'wmic logicaldisk get Name,DriveType'
+            all_disks = subprocess.check_output(cmd, text=True, shell=True, timeout=5)
+            print(f'{cmd}:\n{all_disks}')
+            for line in all_disks.splitlines()[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) == 2:
+                    dtype, drive = parts
+                    used.add(drive[0].upper())
+            print(f'used:{used}')
+        except Exception as e:
+            print(f"[mount_smb_share] 查询盘符失败: {e}")
+
         # 从 D-Z 依次查找可用盘符
         available = None
         for letter in string.ascii_uppercase[3:]:  # 跳过 A,B,C
@@ -169,7 +180,7 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         raise NotImplementedError(f"Unsupported platform: {sys_platform}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True,timeout=5)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip())
         if not mount_path.exists():
@@ -179,20 +190,34 @@ def mount_smb_share(ip: str, share: str, username: str = "guest", password: Opti
         print(f"[mount_smb_share] username:{username} password:{password} ip:{ip} share:{share} 挂载失败: {e}")
         return None
 
-def unmount_smb_share(path: str) -> bool:
+def unmount_smb_share(path: str, ip ='') -> bool:
     r"""
     卸载 SMB 挂载路径
     - 支持 Windows/Linux/macOS
     - Windows 可传入 Z: 或 \\host\share
+    - 新增ip参数：若传入ip，则只有路径对应挂载点的ip是目标ip时才执行卸载
     """
     sys_platform = platform.system().lower()
-    print(f"[unmount_smb_share] path: {path}")
+    print(f"[unmount_smb_share] path: {path} ip: {ip}")
 
     # 非 Windows 系统直接判断路径是否存在
     if sys_platform == "linux":
         if not Path(path).exists():
             return True
-        cmd = ["sudo", "umount", path] if sys_platform == "linux" else ["umount", path]
+        # 检查目标路径挂载源是否为指定ip
+        if ip:
+            found = False
+            with open("/proc/mounts") as f:
+                for line in f:
+                    cols = line.split()
+                    if cols[1] == str(path) and f"//{ip}/" in cols[0]:
+                        found = True
+                        break
+            if not found:
+                print(f"[unmount_smb_share] 路径未挂载或不属于目标ip，跳过卸载")
+                return True
+
+        cmd = ["sudo", "umount", path]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -204,6 +229,21 @@ def unmount_smb_share(path: str) -> bool:
     elif sys_platform == "darwin":
         if not Path(path).exists():
             return True
+        # 检查目标路径挂载源是否为指定ip
+        if ip:
+            try:
+                mount_info = subprocess.check_output(['mount'], text=True)
+                match = False
+                for line in mount_info.splitlines():
+                    if str(path) in line and ip in line:
+                        match = True
+                        break
+                if not match:
+                    print(f"[unmount_smb_share] 路径未挂载或不属于目标ip，跳过卸载")
+                    return True
+            except Exception as e:
+                print(f"[unmount_smb_share] 查询挂载信息失败: {e}")
+                return True
         try:
             # 使用 AppleScript 让 Finder 卸载卷
             script = f'''
@@ -239,10 +279,22 @@ def unmount_smb_share(path: str) -> bool:
         if re.fullmatch(r"[A-Z]:\\?", path.upper()):
             drive = path[0].upper() + ":"
             print(f"[unmount_smb_share] 识别为盘符: {drive}")
-            # 检查是否已映射该驱动器
+            # 检查是否已映射该驱动器，且映射目标为ip
             try:
                 output = subprocess.check_output(["net", "use"], text=True)
-                if drive in output:
+                related_line = None
+                for line in output.splitlines():
+                    if line.strip().startswith(drive):
+                        related_line = line
+                        break
+                need_unmount = True
+                if ip and related_line:
+                    # 检查映射目标
+                    parts = re.split(r"\s{2,}", related_line.strip())
+                    if len(parts) >= 2 and ip not in parts[1]:
+                        print(f"[unmount_smb_share] 路径不属于目标ip，跳过卸载")
+                        return True
+                if related_line:
                     cmd = ["net", "use", drive, "/delete", "/y"]
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     if result.returncode != 0:
@@ -267,14 +319,12 @@ def unmount_smb_share(path: str) -> bool:
                     line = line.strip()
                     if not line or not "\\" in line:
                         continue
-                    
-                    # 尝试从字段中提取本地盘符和远程路径
                     parts = re.split(r"\s{2,}", line)
-                    print(f"[unmount_smb_share] line: {line} parts: {parts}")
                     if len(parts) >= 3:
                         status, local, remote = parts[:3]
                         permanent = is_permanent_mapping(local)
-                        print(f"[unmount_smb_share] status: {status} local: {local} remote: {remote} permanent:{permanent}")
+                        if ip and ip not in remote:
+                            continue
                         if (remote.lower() == path.lower()) and (not permanent):
                             print(f"[unmount_smb_share] 匹配: {local} -> {remote}，卸载中...")
                             subprocess.run(["net", "use", local, "/delete", "/y"],
@@ -289,7 +339,7 @@ def unmount_smb_share(path: str) -> bool:
 
     else:
         raise NotImplementedError(f"Unsupported platform: {sys_platform}")
-    
+
 if __name__ == "__main__":
     path = mount_smb_share("192.168.1.141", "pi")
     if path and os.path.exists(path):
